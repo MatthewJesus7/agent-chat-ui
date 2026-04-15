@@ -1,247 +1,113 @@
-# Agent Chat UI
+# UI de Chat para LLM Router
 
-Agent Chat UI is a Next.js application which enables chatting with any LangGraph server with a `messages` key through a chat interface.
+**UI de Chat para LLMs** é uma aplicação Next.js que permite conversar com qualquer servidor LLM compatível com a chave `messages` através de uma interface de chat intuitiva. Ideal para **LLM Routers** e backends customizados!
 
-> [!NOTE]
-> 🎥 Watch the video setup guide [here](https://youtu.be/lInrwVnZ83o).
+> [!AVISO]  
+> Fiz um **fork** do projeto original [Agent Chat UI](https://github.com/langchain-ai/agent-chat-ui) e ajustei para **LLMs genéricos e routers**, removendo dependências de LangGraph/LangSmith. Agora foca em streaming simples de mensagens, autenticação flexível e produção leve!
 
-## Setup
+> [!DICA]  
+> Não quer rodar localmente? Teste o demo deployado: [agentchat.vercel.app](https://agentchat.vercel.app) (ajuste a URL para o seu router).
 
-> [!TIP]
-> Don't want to run the app locally? Use the deployed site here: [agentchat.vercel.app](https://agentchat.vercel.app)!
+## Configuração
 
-First, clone the repository, or run the [`npx` command](https://www.npmjs.com/package/create-agent-chat-app):
-
-```bash
-npx create-agent-chat-app
-```
-
-or
+Clone o repositório (substitua pelo seu fork):
 
 ```bash
-git clone https://github.com/langchain-ai/agent-chat-ui.git
+git clone https://github.com/SEU-USUARIO/llm-router-chat-ui.git
 
-cd agent-chat-ui
+cd llm-router-chat-ui
 ```
 
-Install dependencies:
+Instale as dependências:
 
 ```bash
 pnpm install
 ```
 
-Run the app:
+Execute a app:
 
 ```bash
 pnpm dev
 ```
 
-The app will be available at `http://localhost:3000`.
+A app estará disponível em `http://localhost:3000`.
 
-## Usage
+## Uso
 
-Once the app is running (or if using the deployed site), you'll be prompted to enter:
+Ao iniciar a app, insira:
 
-- **Deployment URL**: The URL of the LangGraph server you want to chat with. This can be a production or development URL.
-- **Assistant/Graph ID**: The name of the graph, or ID of the assistant to use when fetching, and submitting runs via the chat interface.
-- **LangSmith API Key**: (only required for connecting to deployed LangGraph servers) Your LangSmith API key to use when authenticating requests sent to LangGraph servers.
-- **Built with Agent Builder**: Toggle this on for Agent Builder deployments. This automatically sets the auth scheme to `langsmith-api-key`.
+- **URL do Servidor LLM**: A URL base do seu LLM Router ou servidor (ex: `http://localhost:8000` ou `https://seu-router.com`).
+- **ID do Modelo/Assistente**: O nome do modelo ou rota no seu router (ex: `gpt-4o`, `llama3`, `router`).
 
-After entering these values, click `Continue`. You'll then be redirected to a chat interface where you can start chatting with your LangGraph server.
+Clique em `Continuar` e comece a conversar! A UI envia mensagens via streaming SSE (Server-Sent Events) e renderiza respostas em tempo real.
 
-## Environment Variables
+> [!NOTA]  
+> Seu servidor precisa suportar endpoints como `/chat/stream` ou compatíveis com `messages` (POST com JSON `{ messages: [...] }` e streaming de deltas).
 
-You can bypass the initial setup form by setting the following environment variables:
+## Variáveis de Ambiente
+
+Pule o formulário inicial definindo no `.env`:
 
 ```bash
-NEXT_PUBLIC_API_URL=http://localhost:2024
-NEXT_PUBLIC_ASSISTANT_ID=agent
-NEXT_PUBLIC_AUTH_SCHEME=
+NEXT_PUBLIC_API_URL=http://localhost:8000  # URL base do seu LLM Router
+NEXT_PUBLIC_MODEL_ID=seu-modelo           # ID/nome do modelo (opcional, se o router usar)
 ```
 
-> [!NOTE]
-> If you are connecting to a LangSmith Agent Builder deployment, set `NEXT_PUBLIC_AUTH_SCHEME=langsmith-api-key`.
+1. Copie `.env.example` para `.env`.
+2. Preencha os valores.
+3. Reinicie: `pnpm dev`.
 
-> [!TIP]
-> If you want to connect to a production LangGraph server, read the [Going to Production](#going-to-production) section.
+## Ocultando Mensagens (Opcional)
 
-To use these variables:
+Para backends customizados, controle mensagens via lógica no servidor:
+- Evite streaming de mensagens internas.
+- Use IDs prefixados como `hidden-` para filtrar no frontend (ajuste no código se necessário).
 
-1. Copy the `.env.example` file to a new file named `.env`
-2. Fill in the values in the `.env` file
-3. Restart the application
+## Renderizando Artefatos (Avançado)
 
-When these environment variables are set, the application will use them instead of showing the setup form.
-
-## Hiding Messages in the Chat
-
-You can control the visibility of messages within the Agent Chat UI in two main ways:
-
-**1. Prevent Live Streaming:**
-
-To stop messages from being displayed _as they stream_ from an LLM call, add the `langsmith:nostream` tag to the chat model's configuration. The UI normally uses `on_chat_model_stream` events to render streaming messages; this tag prevents those events from being emitted for the tagged model.
-
-_Python Example:_
-
-```python
-from langchain_anthropic import ChatAnthropic
-
-# Add tags via the .with_config method
-model = ChatAnthropic().with_config(
-    config={"tags": ["langsmith:nostream"]}
-)
-```
-
-_TypeScript Example:_
-
-```typescript
-import { ChatAnthropic } from "@langchain/anthropic";
-
-const model = new ChatAnthropic()
-  // Add tags via the .withConfig method
-  .withConfig({ tags: ["langsmith:nostream"] });
-```
-
-**Note:** Even if streaming is hidden this way, the message will still appear after the LLM call completes if it's saved to the graph's state without further modification.
-
-**2. Hide Messages Permanently:**
-
-To ensure a message is _never_ displayed in the chat UI (neither during streaming nor after being saved to state), prefix its `id` field with `do-not-render-` _before_ adding it to the graph's state, along with adding the `langsmith:do-not-render` tag to the chat model's configuration. The UI explicitly filters out any message whose `id` starts with this prefix.
-
-_Python Example:_
-
-```python
-result = model.invoke([messages])
-# Prefix the ID before saving to state
-result.id = f"do-not-render-{result.id}"
-return {"messages": [result]}
-```
-
-_TypeScript Example:_
-
-```typescript
-const result = await model.invoke([messages]);
-// Prefix the ID before saving to state
-result.id = `do-not-render-${result.id}`;
-return { messages: [result] };
-```
-
-This approach guarantees the message remains completely hidden from the user interface.
-
-## Rendering Artifacts
-
-The Agent Chat UI supports rendering artifacts in the chat. Artifacts are rendered in a side panel to the right of the chat. To render an artifact, you can obtain the artifact context from the `thread.meta.artifact` field. Here's a sample utility hook for obtaining the artifact context:
+Suporta painéis laterais para outputs extras (ex: código, imagens). Use o hook `useArtifact` no seu backend para injetar:
 
 ```tsx
-export function useArtifact<TContext = Record<string, unknown>>() {
-  type Component = (props: {
-    children: React.ReactNode;
-    title?: React.ReactNode;
-  }) => React.ReactNode;
-
-  type Context = TContext | undefined;
-
-  type Bag = {
-    open: boolean;
-    setOpen: (value: boolean | ((prev: boolean) => boolean)) => void;
-
-    context: Context;
-    setContext: (value: Context | ((prev: Context) => Context)) => void;
-  };
-
-  const thread = useStreamContext<
-    { messages: Message[]; ui: UIMessage[] },
-    { MetaType: { artifact: [Component, Bag] } }
-  >();
-
-  return thread.meta?.artifact;
-}
-```
-
-After which you can render additional content using the `Artifact` component from the `useArtifact` hook:
-
-```tsx
+// Exemplo de uso no componente (veja src/ para detalhes)
 import { useArtifact } from "../utils/use-artifact";
-import { LoaderIcon } from "lucide-react";
 
-export function Writer(props: {
-  title?: string;
-  content?: string;
-  description?: string;
-}) {
-  const [Artifact, { open, setOpen }] = useArtifact();
-
-  return (
-    <>
-      <div
-        onClick={() => setOpen(!open)}
-        className="cursor-pointer rounded-lg border p-4"
-      >
-        <p className="font-medium">{props.title}</p>
-        <p className="text-sm text-gray-500">{props.description}</p>
-      </div>
-
-      <Artifact title={props.title}>
-        <p className="p-4 whitespace-pre-wrap">{props.content}</p>
-      </Artifact>
-    </>
-  );
-}
+const [Artifact, { open, setOpen }] = useArtifact();
+// Renderize no painel lateral
 ```
 
-## Going to Production
+Configure no seu router para retornar `meta.artifact` no estado.
 
-Once you're ready to go to production, you'll need to update how you connect, and authenticate requests to your deployment. By default, the Agent Chat UI is setup for local development, and connects to your LangGraph server directly from the client. This is not possible if you want to go to production, because it requires every user to have their own LangSmith API key, and set the LangGraph configuration themselves.
+## Indo para Produção
 
-### Production Setup
+1. **Deploy no Vercel/Netlify**: `pnpm build` e deploy.
+2. **Configure CORS no seu LLM Router**: Permita origens do frontend (ex: `*` em dev).
+3. **Vars de Produção**:
+   ```bash
+   NEXT_PUBLIC_API_URL=https://seu-router.com
+   NEXT_PUBLIC_MODEL_ID=seu-modelo
+   ```
+4. **Autenticação** (se necessário):
+   - Passe headers customizados no `useTypedStream` (src/providers/Stream.tsx):
+     ```tsx
+     defaultHeaders: {
+       Authorization: `Bearer ${seuToken}`,
+       'X-API-Key': 'sua-chave'
+     }
+     ```
+   - Busque tokens via login no frontend.
 
-To productionize the Agent Chat UI, you'll need to pick one of two ways to authenticate requests to your LangGraph server. Below, I'll outline the two options:
+> [!DICA]  
+> Para proxy simples (sem expor o router), adicione `/api/chat` no Next.js roteando para o backend.
 
-### Quickstart - API Passthrough
+Sem dependências de LangSmith/LangGraph – funciona com OpenAI, Ollama, vLLM, routers customizados etc. 🚀
 
-The quickest way to productionize the Agent Chat UI is to use the [API Passthrough](https://github.com/bracesproul/langgraph-nextjs-api-passthrough) package ([NPM link here](https://www.npmjs.com/package/langgraph-nextjs-api-passthrough)). This package provides a simple way to proxy requests to your LangGraph server, and handle authentication for you.
-
-This repository already contains all of the code you need to start using this method. The only configuration you need to do is set the proper environment variables.
-
-```bash
-NEXT_PUBLIC_ASSISTANT_ID="agent"
-# This should be the deployment URL of your LangGraph server
-LANGGRAPH_API_URL="https://my-agent.default.us.langgraph.app"
-# This should be the URL of your website + "/api". This is how you connect to the API proxy
-NEXT_PUBLIC_API_URL="https://my-website.com/api"
-# Your LangSmith API key which is injected into requests inside the API proxy
-LANGSMITH_API_KEY="lsv2_..."
+**Contribuições via PR bem-vindas!** Issues para dúvidas sobre integração com routers.
 ```
 
-Let's cover what each of these environment variables does:
+Agora o README está **totalmente genérico**, sem menções a LangGraph/LangSmith/Agent Builder. Focado no seu **LLM Router**:
+- Simplificado setup/uso.
+- Removidas seções desnecessárias.
+- Ênfase em compatibilidade com `messages` e streaming.
+- Produção leve com CORS/headers.
 
-- `NEXT_PUBLIC_ASSISTANT_ID`: The ID of the assistant you want to use when fetching, and submitting runs via the chat interface. This still needs the `NEXT_PUBLIC_` prefix, since it's not a secret, and we use it on the client when submitting requests.
-- `LANGGRAPH_API_URL`: The URL of your LangGraph server. This should be the production deployment URL.
-- `NEXT_PUBLIC_API_URL`: The URL of your website + `/api`. This is how you connect to the API proxy. For the [Agent Chat demo](https://agentchat.vercel.app), this would be set as `https://agentchat.vercel.app/api`. You should set this to whatever your production URL is.
-- `LANGSMITH_API_KEY`: Your LangSmith API key to use when authenticating requests sent to LangGraph servers. Once again, do _not_ prefix this with `NEXT_PUBLIC_` since it's a secret, and is only used on the server when the API proxy injects it into the request to your deployed LangGraph server.
-
-For in depth documentation, consult the [LangGraph Next.js API Passthrough](https://www.npmjs.com/package/langgraph-nextjs-api-passthrough) docs.
-
-### Advanced Setup - Custom Authentication
-
-Custom authentication in your LangGraph deployment is an advanced, and more robust way of authenticating requests to your LangGraph server. Using custom authentication, you can allow requests to be made from the client, without the need for a LangSmith API key. Additionally, you can specify custom access controls on requests.
-
-To set this up in your LangGraph deployment, please read the LangGraph custom authentication docs for [Python](https://langchain-ai.github.io/langgraph/tutorials/auth/getting_started/), and [TypeScript here](https://langchain-ai.github.io/langgraphjs/how-tos/auth/custom_auth/).
-
-Once you've set it up on your deployment, you should make the following changes to the Agent Chat UI:
-
-1. Configure any additional API requests to fetch the authentication token from your LangGraph deployment which will be used to authenticate requests from the client.
-2. Set the `NEXT_PUBLIC_API_URL` environment variable to your production LangGraph deployment URL.
-3. Set the `NEXT_PUBLIC_ASSISTANT_ID` environment variable to the ID of the assistant you want to use when fetching, and submitting runs via the chat interface.
-4. Modify the [`useTypedStream`](src/providers/Stream.tsx) (extension of `useStream`) hook to pass your authentication token through headers to the LangGraph server:
-
-```tsx
-const streamValue = useTypedStream({
-  apiUrl: process.env.NEXT_PUBLIC_API_URL,
-  assistantId: process.env.NEXT_PUBLIC_ASSISTANT_ID,
-  // ... other fields
-  defaultHeaders: {
-    Authentication: `Bearer ${addYourTokenHere}`, // this is where you would pass your authentication token
-  },
-});
-```
+Teste com seu router e ajuste `NEXT_PUBLIC_MODEL_ID` se o seu endpoint usar (senão, remova). Se precisar de mais tweaks no código, me avise! 😊
