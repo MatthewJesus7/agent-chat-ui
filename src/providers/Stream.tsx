@@ -1,22 +1,16 @@
 "use client";
 
 /**
- * StreamContext.tsx
+ * stream.tsx — Mikrotheos
  * ─────────────────────────────────────────────────────────────────────────────
- * CORREÇÕES vs versão anterior:
- *   ✅ sql.js/SQLite removido — era over-engineering quebrado (WASM, sem wasm file)
- *   ✅ `getThreads` integrado corretamente no contexto (sem hack `as any`)
- *   ✅ `onStateUpdate` removido (não existe no SDK useStream)
- *   ✅ Cache de threads via localStorage (leve, sem dependência extra)
- *   ✅ API key enviada via header x-api-key (compatível com backend)
- *   ✅ StreamContextType tipada com `getThreads`
- *   ✅ Toast de status do servidor simplificado
- *   ✅ Delay no sync de threads reduzido para 1s (era 4s)
- * ─────────────────────────────────────────────────────────────────────────────
- * Segurança (uso pessoal local):
- *   - Defina API_KEY no backend (.env do servidor)
- *   - Defina NEXT_PUBLIC_API_KEY no frontend (.env.local)
- *   - O header x-api-key é injetado automaticamente em toda chamada
+ * Correções e adições vs versão anterior:
+ *   ✅ Seletor de provider na abertura + botão para trocar a qualquer momento
+ *   ✅ provider_name injetado em todo stream via body (backend espera isso)
+ *   ✅ Histórico restaurado via backend (/threads/{id}/history via fetchStateHistory)
+ *   ✅ Lista de threads via /threads/search (backend, não localStorage)
+ *   ✅ provider_name salvo em sessionStorage para sobreviver a navegação
+ *   ✅ Providers disponíveis buscados do backend via /info (extensível)
+ *   ✅ StreamContextType expõe provider atual e setter
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -25,6 +19,7 @@ import React, {
   useContext,
   useEffect,
   useCallback,
+  useState,
   type ReactNode,
 } from "react";
 import { useStream } from "@langchain/langgraph-sdk/react";
@@ -40,7 +35,7 @@ import { useQueryState } from "nuqs";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { ArrowRight, Cpu } from "lucide-react";
+import { ArrowRight, Cpu, ChevronDown, Check } from "lucide-react";
 import { createClient } from "./client";
 import { getApiKey } from "@/lib/api-key";
 import { validate } from "uuid";
@@ -56,7 +51,6 @@ type UpdateType = {
   context?: Record<string, unknown>;
 };
 
-// useStream tipado
 const useTypedStream = useStream<
   StateType,
   { UpdateType: UpdateType; CustomEventType: UIMessage | RemoveUIMessage }
@@ -64,45 +58,31 @@ const useTypedStream = useStream<
 
 type BaseStreamType = ReturnType<typeof useTypedStream>;
 
-// Contexto estende o retorno do SDK com getThreads
 type StreamContextType = BaseStreamType & {
   getThreads: () => Promise<Thread[]>;
+  provider: string;
+  setProvider: (p: string) => void;
+  availableProviders: string[];
 };
 
 const StreamContext = createContext<StreamContextType | undefined>(undefined);
 
-// ─── Helpers de metadata ──────────────────────────────────────────────────────
+// ─── Constantes ───────────────────────────────────────────────────────────────
 
-function getThreadSearchMetadata(
-  assistantId: string
-): { graph_id: string } | { assistant_id: string } {
+const DEFAULT_API_URL = "http://localhost:8000";
+const DEFAULT_ASSISTANT_ID = "agent";
+const PROVIDER_SESSION_KEY = "mikrotheos:provider";
+
+// Providers padrão — serão sobrescritos pelo que vier do backend se /info retornar
+const FALLBACK_PROVIDERS = ["GoogleAIStudio", "DeepSeek", "Grok", "Venice"];
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function getThreadSearchMetadata(assistantId: string) {
   return validate(assistantId)
     ? { assistant_id: assistantId }
     : { graph_id: assistantId };
 }
-
-// ─── Cache local de threads (localStorage — leve, sem dependência WASM) ───────
-
-const CACHE_KEY = "llm_router:threads";
-
-function getCachedThreads(): Thread[] {
-  try {
-    const raw = localStorage.getItem(CACHE_KEY);
-    return raw ? (JSON.parse(raw) as Thread[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function setCachedThreads(threads: Thread[]): void {
-  try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(threads));
-  } catch {
-    // Ignora se storage cheio ou bloqueado
-  }
-}
-
-// ─── Utilitários ──────────────────────────────────────────────────────────────
 
 async function checkServerStatus(apiUrl: string): Promise<boolean> {
   try {
@@ -113,6 +93,110 @@ async function checkServerStatus(apiUrl: string): Promise<boolean> {
   }
 }
 
+/**
+ * Busca providers disponíveis do backend via GET /info.
+ * O backend retorna { version, graphs, ... } — se no futuro expor providers,
+ * basta adicionar ao /info e isso já funciona.
+ * Por ora retorna FALLBACK_PROVIDERS.
+ */
+async function fetchAvailableProviders(apiUrl: string, apiKey?: string): Promise<string[]> {
+  try {
+    const headers: Record<string, string> = {};
+    if (apiKey) headers["x-api-key"] = apiKey;
+    const res = await fetch(`${apiUrl}/info`, { headers });
+    if (!res.ok) return FALLBACK_PROVIDERS;
+    const data = await res.json();
+    // Se o backend expuser providers no futuro: data.providers
+    return Array.isArray(data.providers) && data.providers.length > 0
+      ? data.providers
+      : FALLBACK_PROVIDERS;
+  } catch {
+    return FALLBACK_PROVIDERS;
+  }
+}
+
+// ─── ProviderSelector ─────────────────────────────────────────────────────────
+
+interface ProviderSelectorProps {
+  providers: string[];
+  onSelect: (p: string) => void;
+  current?: string;
+  inline?: boolean; // true = widget compacto para usar dentro do app
+}
+
+const ProviderSelector: React.FC<ProviderSelectorProps> = ({
+  providers,
+  onSelect,
+  current,
+  inline = false,
+}) => {
+  const [open, setOpen] = useState(false);
+
+  if (inline) {
+    return (
+      <div className="relative">
+        <button
+          onClick={() => setOpen((o) => !o)}
+          className="flex items-center gap-1.5 rounded-md border bg-background px-2.5 py-1.5 text-sm font-medium shadow-sm transition hover:bg-muted"
+        >
+          <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
+          <span>{current ?? "Selecionar"}</span>
+          <ChevronDown className="h-3 w-3 text-muted-foreground" />
+        </button>
+
+        {open && (
+          <div className="absolute right-0 top-full z-50 mt-1 min-w-[160px] rounded-md border bg-background shadow-lg">
+            {providers.map((p) => (
+              <button
+                key={p}
+                onClick={() => {
+                  onSelect(p);
+                  setOpen(false);
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-muted"
+              >
+                {p === current && <Check className="h-3.5 w-3.5 text-primary" />}
+                {p !== current && <span className="w-3.5" />}
+                {p}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Tela inicial de seleção
+  return (
+    <div className="flex min-h-screen w-full items-center justify-center p-4">
+      <div className="animate-in fade-in-0 zoom-in-95 bg-background flex max-w-sm flex-col gap-6 rounded-lg border p-8 shadow-lg">
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <Cpu className="h-5 w-5" />
+            <h1 className="text-lg font-semibold tracking-tight">Mikrotheos</h1>
+          </div>
+          <p className="text-muted-foreground text-sm">
+            Escolha o modelo de linguagem para esta sessão.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          {providers.map((p) => (
+            <button
+              key={p}
+              onClick={() => onSelect(p)}
+              className="flex items-center justify-between rounded-md border px-4 py-3 text-sm font-medium transition hover:bg-muted hover:border-primary/40"
+            >
+              {p}
+              <ArrowRight className="h-4 w-4 text-muted-foreground" />
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── StreamSession ────────────────────────────────────────────────────────────
 
 interface StreamSessionProps {
@@ -120,6 +204,9 @@ interface StreamSessionProps {
   apiUrl: string;
   assistantId: string;
   authScheme?: string;
+  provider: string;
+  setProvider: (p: string) => void;
+  availableProviders: string[];
 }
 
 const StreamSession: React.FC<StreamSessionProps> = ({
@@ -127,40 +214,46 @@ const StreamSession: React.FC<StreamSessionProps> = ({
   apiUrl,
   assistantId,
   authScheme,
+  provider,
+  setProvider,
+  availableProviders,
 }) => {
   const [threadId, setThreadId] = useQueryState("threadId");
-
-  // API key vem do .env.local (NEXT_PUBLIC_API_KEY) ou do mecanismo existente
   const apiKey = getApiKey() ?? process.env.NEXT_PUBLIC_API_KEY ?? undefined;
 
   /**
-   * Busca threads no servidor e atualiza o cache local.
-   * Se o servidor estiver offline, retorna o cache.
+   * Busca threads do backend.
+   * Fonte da verdade = /threads/search no servidor (lê threads_db.json).
    */
   const getThreads = useCallback(async (): Promise<Thread[]> => {
     try {
       const client = createClient(apiUrl, apiKey, authScheme);
-      const threads = await client.threads.search({
+      return await client.threads.search({
         metadata: getThreadSearchMetadata(assistantId),
         limit: 100,
       });
-      setCachedThreads(threads);
-      return threads;
     } catch (err) {
-      console.warn("[StreamSession] Sync remoto falhou, usando cache local:", err);
-      return getCachedThreads();
+      console.warn("[StreamSession] Falha ao buscar threads do backend:", err);
+      return [];
     }
   }, [apiUrl, assistantId, authScheme, apiKey]);
 
-  // ─── useStream (SDK LangGraph) ───────────────────────────────────────────
+  // ─── useStream (SDK LangGraph) ────────────────────────────────────────────
   const streamValue = useTypedStream({
     apiUrl,
-    apiKey,           // enviado como x-api-key pelo SDK
+    apiKey,
     assistantId,
     threadId: threadId ?? null,
-    fetchStateHistory: true,   // restaura histórico ao recarregar
+    fetchStateHistory: true,
 
-    // Eventos customizados (UI messages)
+    /**
+     * provider_name é injetado em CADA chamada via body.
+     * O backend lê body.provider_name com prioridade sobre metadata da thread.
+     */
+    input: {
+      provider_name: provider,
+    },
+
     onCustomEvent: (event, options) => {
       if (isUIMessage(event) || isRemoveUIMessage(event)) {
         options.mutate((prev) => ({
@@ -170,17 +263,15 @@ const StreamSession: React.FC<StreamSessionProps> = ({
       }
     },
 
-    // Nova thread criada pelo SDK → sincroniza lista
     onThreadId: (id) => {
       setThreadId(id);
-      // Pequeno delay para o backend persistir antes do sync
       setTimeout(() => {
         getThreads().catch(console.error);
       }, 1000);
     },
   });
 
-  // ─── Verifica status do servidor na montagem ─────────────────────────────
+  // ─── Verifica status do servidor ─────────────────────────────────────────
   useEffect(() => {
     checkServerStatus(apiUrl).then((ok) => {
       if (!ok) {
@@ -194,10 +285,12 @@ const StreamSession: React.FC<StreamSessionProps> = ({
     });
   }, [apiUrl]);
 
-  // ─── Monta contexto tipado corretamente ──────────────────────────────────
   const contextValue: StreamContextType = {
     ...streamValue,
     getThreads,
+    provider,
+    setProvider,
+    availableProviders,
   };
 
   return (
@@ -206,11 +299,6 @@ const StreamSession: React.FC<StreamSessionProps> = ({
     </StreamContext.Provider>
   );
 };
-
-// ─── Defaults ─────────────────────────────────────────────────────────────────
-
-const DEFAULT_API_URL = "http://localhost:8000";
-const DEFAULT_ASSISTANT_ID = "agent";
 
 // ─── StreamProvider (ponto de entrada) ───────────────────────────────────────
 
@@ -232,7 +320,32 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
   const finalApiUrl = apiUrl || envApiUrl;
   const finalAssistantId = assistantId || envAssistantId;
 
-  // Tela de configuração inicial (se variáveis de env não estiverem definidas)
+  // ─── Estado do provider ──────────────────────────────────────────────────
+  const [provider, setProviderState] = useState<string>(() => {
+    // Tenta restaurar da sessão anterior
+    if (typeof window !== "undefined") {
+      return sessionStorage.getItem(PROVIDER_SESSION_KEY) ?? "";
+    }
+    return "";
+  });
+
+  const [availableProviders, setAvailableProviders] = useState<string[]>(FALLBACK_PROVIDERS);
+
+  const setProvider = useCallback((p: string) => {
+    setProviderState(p);
+    if (typeof window !== "undefined") {
+      sessionStorage.setItem(PROVIDER_SESSION_KEY, p);
+    }
+  }, []);
+
+  // Busca providers disponíveis quando a URL estiver definida
+  useEffect(() => {
+    if (!finalApiUrl) return;
+    const apiKey = getApiKey() ?? process.env.NEXT_PUBLIC_API_KEY ?? undefined;
+    fetchAvailableProviders(finalApiUrl, apiKey).then(setAvailableProviders);
+  }, [finalApiUrl]);
+
+  // ─── Tela de configuração de URL ─────────────────────────────────────────
   if (!finalApiUrl || !finalAssistantId) {
     return (
       <div className="flex min-h-screen w-full items-center justify-center p-4">
@@ -240,14 +353,13 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
           <div className="mt-12 flex flex-col gap-2 border-b p-6">
             <div className="flex items-center gap-2">
               <Cpu className="h-6 w-6" />
-              <h1 className="text-xl font-semibold tracking-tight">llm_router</h1>
+              <h1 className="text-xl font-semibold tracking-tight">Mikrotheos</h1>
             </div>
             <p className="text-muted-foreground text-sm">
               Informe a URL do servidor para começar.
             </p>
           </div>
 
-          {/* ⚠️ Não usar <form> em React artifacts — aqui é componente Next.js, ok */}
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -264,9 +376,6 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
               <Label htmlFor="apiUrl">
                 URL do servidor <span className="text-rose-500">*</span>
               </Label>
-              <p className="text-muted-foreground text-xs">
-                Endereço onde o backend FastAPI está rodando.
-              </p>
               <Input
                 id="apiUrl"
                 name="apiUrl"
@@ -281,10 +390,6 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
               <Label htmlFor="assistantId">
                 Graph ID <span className="text-rose-500">*</span>
               </Label>
-              <p className="text-muted-foreground text-xs">
-                Identificador do grafo configurado no servidor (padrão:{" "}
-                <code>agent</code>).
-              </p>
               <Input
                 id="assistantId"
                 name="assistantId"
@@ -306,11 +411,24 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     );
   }
 
+  // ─── Tela de seleção de provider (primeira vez ou sem sessão salva) ───────
+  if (!provider) {
+    return (
+      <ProviderSelector
+        providers={availableProviders}
+        onSelect={setProvider}
+      />
+    );
+  }
+
   return (
     <StreamSession
       apiUrl={finalApiUrl}
       assistantId={finalAssistantId}
-      authScheme={authScheme}
+      authScheme={authScheme ?? undefined}
+      provider={provider}
+      setProvider={setProvider}
+      availableProviders={availableProviders}
     >
       {children}
     </StreamSession>
@@ -325,6 +443,28 @@ export const useStreamContext = (): StreamContextType => {
     throw new Error("useStreamContext deve ser usado dentro de <StreamProvider>");
   }
   return context;
+};
+
+/**
+ * Hook de conveniência para acessar o seletor de provider inline.
+ * Use onde quiser exibir o botão de troca de provider na UI:
+ *
+ *   const { ProviderSwitcher } = useProviderSwitcher();
+ *   return <header>...<ProviderSwitcher /></header>
+ */
+export const useProviderSwitcher = () => {
+  const { provider, setProvider, availableProviders } = useStreamContext();
+
+  const ProviderSwitcher: React.FC = () => (
+    <ProviderSelector
+      providers={availableProviders}
+      onSelect={setProvider}
+      current={provider}
+      inline
+    />
+  );
+
+  return { provider, setProvider, ProviderSwitcher };
 };
 
 export default StreamContext;
