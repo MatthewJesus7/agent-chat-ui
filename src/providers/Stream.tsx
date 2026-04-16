@@ -1,12 +1,34 @@
+"use client";
+
+/**
+ * StreamContext.tsx
+ * ─────────────────────────────────────────────────────────────────────────────
+ * CORREÇÕES vs versão anterior:
+ *   ✅ sql.js/SQLite removido — era over-engineering quebrado (WASM, sem wasm file)
+ *   ✅ `getThreads` integrado corretamente no contexto (sem hack `as any`)
+ *   ✅ `onStateUpdate` removido (não existe no SDK useStream)
+ *   ✅ Cache de threads via localStorage (leve, sem dependência extra)
+ *   ✅ API key enviada via header x-api-key (compatível com backend)
+ *   ✅ StreamContextType tipada com `getThreads`
+ *   ✅ Toast de status do servidor simplificado
+ *   ✅ Delay no sync de threads reduzido para 1s (era 4s)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Segurança (uso pessoal local):
+ *   - Defina API_KEY no backend (.env do servidor)
+ *   - Defina NEXT_PUBLIC_API_KEY no frontend (.env.local)
+ *   - O header x-api-key é injetado automaticamente em toda chamada
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
 import React, {
   createContext,
   useContext,
-  ReactNode,
-  useState,
   useEffect,
+  useCallback,
+  type ReactNode,
 } from "react";
 import { useStream } from "@langchain/langgraph-sdk/react";
-import { type Message } from "@langchain/langgraph-sdk";
+import { type Message, type Thread } from "@langchain/langgraph-sdk";
 import {
   uiMessageReducer,
   isUIMessage,
@@ -17,283 +39,265 @@ import {
 import { useQueryState } from "nuqs";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { LangGraphLogoSVG } from "@/components/icons/langgraph";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { ArrowRight } from "lucide-react";
-import { PasswordInput } from "@/components/ui/password-input";
+import { ArrowRight, Cpu } from "lucide-react";
+import { createClient } from "./client";
 import { getApiKey } from "@/lib/api-key";
-import { useThreads } from "./Thread";
+import { validate } from "uuid";
 import { toast } from "sonner";
+
+// ─── Tipos ────────────────────────────────────────────────────────────────────
 
 export type StateType = { messages: Message[]; ui?: UIMessage[] };
 
+type UpdateType = {
+  messages?: Message[] | Message | string;
+  ui?: (UIMessage | RemoveUIMessage)[] | UIMessage | RemoveUIMessage;
+  context?: Record<string, unknown>;
+};
+
+// useStream tipado
 const useTypedStream = useStream<
   StateType,
-  {
-    UpdateType: {
-      messages?: Message[] | Message | string;
-      ui?: (UIMessage | RemoveUIMessage)[] | UIMessage | RemoveUIMessage;
-      context?: Record<string, unknown>;
-    };
-    CustomEventType: UIMessage | RemoveUIMessage;
-  }
+  { UpdateType: UpdateType; CustomEventType: UIMessage | RemoveUIMessage }
 >;
 
-type StreamContextType = ReturnType<typeof useTypedStream>;
+type BaseStreamType = ReturnType<typeof useTypedStream>;
+
+// Contexto estende o retorno do SDK com getThreads
+type StreamContextType = BaseStreamType & {
+  getThreads: () => Promise<Thread[]>;
+};
+
 const StreamContext = createContext<StreamContextType | undefined>(undefined);
 
-async function sleep(ms = 4000) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// ─── Helpers de metadata ──────────────────────────────────────────────────────
+
+function getThreadSearchMetadata(
+  assistantId: string
+): { graph_id: string } | { assistant_id: string } {
+  return validate(assistantId)
+    ? { assistant_id: assistantId }
+    : { graph_id: assistantId };
 }
 
-async function checkGraphStatus(
-  apiUrl: string,
-  apiKey: string | null,
-  authScheme?: string,
-): Promise<boolean> {
+// ─── Cache local de threads (localStorage — leve, sem dependência WASM) ───────
+
+const CACHE_KEY = "llm_router:threads";
+
+function getCachedThreads(): Thread[] {
   try {
-    const headers = new Headers();
-    if (apiKey) headers.set("X-Api-Key", apiKey);
-    if (authScheme) headers.set("X-Auth-Scheme", authScheme);
+    const raw = localStorage.getItem(CACHE_KEY);
+    return raw ? (JSON.parse(raw) as Thread[]) : [];
+  } catch {
+    return [];
+  }
+}
 
-    const res = await fetch(`${apiUrl}/info`, {
-      headers,
-    });
+function setCachedThreads(threads: Thread[]): void {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(threads));
+  } catch {
+    // Ignora se storage cheio ou bloqueado
+  }
+}
 
+// ─── Utilitários ──────────────────────────────────────────────────────────────
+
+async function checkServerStatus(apiUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${apiUrl}/info`);
     return res.ok;
-  } catch (e) {
-    console.error(e);
+  } catch {
     return false;
   }
 }
 
-const StreamSession = ({
-  children,
-  apiKey,
-  apiUrl,
-  assistantId,
-  authScheme,
-}: {
+// ─── StreamSession ────────────────────────────────────────────────────────────
+
+interface StreamSessionProps {
   children: ReactNode;
-  apiKey: string | null;
   apiUrl: string;
   assistantId: string;
   authScheme?: string;
+}
+
+const StreamSession: React.FC<StreamSessionProps> = ({
+  children,
+  apiUrl,
+  assistantId,
+  authScheme,
 }) => {
   const [threadId, setThreadId] = useQueryState("threadId");
-  const { getThreads, setThreads } = useThreads();
+
+  // API key vem do .env.local (NEXT_PUBLIC_API_KEY) ou do mecanismo existente
+  const apiKey = getApiKey() ?? process.env.NEXT_PUBLIC_API_KEY ?? undefined;
+
+  /**
+   * Busca threads no servidor e atualiza o cache local.
+   * Se o servidor estiver offline, retorna o cache.
+   */
+  const getThreads = useCallback(async (): Promise<Thread[]> => {
+    try {
+      const client = createClient(apiUrl, apiKey, authScheme);
+      const threads = await client.threads.search({
+        metadata: getThreadSearchMetadata(assistantId),
+        limit: 100,
+      });
+      setCachedThreads(threads);
+      return threads;
+    } catch (err) {
+      console.warn("[StreamSession] Sync remoto falhou, usando cache local:", err);
+      return getCachedThreads();
+    }
+  }, [apiUrl, assistantId, authScheme, apiKey]);
+
+  // ─── useStream (SDK LangGraph) ───────────────────────────────────────────
   const streamValue = useTypedStream({
     apiUrl,
-    apiKey: apiKey ?? undefined,
+    apiKey,           // enviado como x-api-key pelo SDK
     assistantId,
-    ...(authScheme && {
-      defaultHeaders: {
-        "X-Auth-Scheme": authScheme,
-      },
-    }),
     threadId: threadId ?? null,
-    fetchStateHistory: true,
+    fetchStateHistory: true,   // restaura histórico ao recarregar
+
+    // Eventos customizados (UI messages)
     onCustomEvent: (event, options) => {
       if (isUIMessage(event) || isRemoveUIMessage(event)) {
-        options.mutate((prev) => {
-          const ui = uiMessageReducer(prev.ui ?? [], event);
-          return { ...prev, ui };
-        });
+        options.mutate((prev) => ({
+          ...prev,
+          ui: uiMessageReducer(prev.ui ?? [], event),
+        }));
       }
     },
+
+    // Nova thread criada pelo SDK → sincroniza lista
     onThreadId: (id) => {
       setThreadId(id);
-      // Refetch threads list when thread ID changes.
-      // Wait for some seconds before fetching so we're able to get the new thread that was created.
-      sleep().then(() => getThreads().then(setThreads).catch(console.error));
+      // Pequeno delay para o backend persistir antes do sync
+      setTimeout(() => {
+        getThreads().catch(console.error);
+      }, 1000);
     },
   });
 
+  // ─── Verifica status do servidor na montagem ─────────────────────────────
   useEffect(() => {
-    checkGraphStatus(apiUrl, apiKey, authScheme).then((ok) => {
+    checkServerStatus(apiUrl).then((ok) => {
       if (!ok) {
-        toast.error("Failed to connect to LangGraph server", {
-          description: () => (
-            <p>
-              Please ensure your graph is running at <code>{apiUrl}</code> and
-              your API key is correctly set (if connecting to a deployed graph).
-            </p>
-          ),
-          duration: 10000,
+        toast.error("Backend inacessível", {
+          description: `Verifique se o servidor está rodando em ${apiUrl}`,
+          duration: 10_000,
           richColors: true,
           closeButton: true,
         });
       }
     });
-  }, [apiKey, apiUrl, authScheme]);
+  }, [apiUrl]);
+
+  // ─── Monta contexto tipado corretamente ──────────────────────────────────
+  const contextValue: StreamContextType = {
+    ...streamValue,
+    getThreads,
+  };
 
   return (
-    <StreamContext.Provider value={streamValue}>
+    <StreamContext.Provider value={contextValue}>
       {children}
     </StreamContext.Provider>
   );
 };
 
-// Default values for the form
-const DEFAULT_API_URL = "http://localhost:2024";
+// ─── Defaults ─────────────────────────────────────────────────────────────────
+
+const DEFAULT_API_URL = "http://localhost:8000";
 const DEFAULT_ASSISTANT_ID = "agent";
-const AGENT_BUILDER_AUTH_SCHEME = "langsmith-api-key";
+
+// ─── StreamProvider (ponto de entrada) ───────────────────────────────────────
 
 export const StreamProvider: React.FC<{ children: ReactNode }> = ({
   children,
 }) => {
-  // Get environment variables
-  const envApiUrl: string | undefined = process.env.NEXT_PUBLIC_API_URL;
-  const envAssistantId: string | undefined =
-    process.env.NEXT_PUBLIC_ASSISTANT_ID;
-  const envAuthScheme: string | undefined = process.env.NEXT_PUBLIC_AUTH_SCHEME;
+  const envApiUrl = process.env.NEXT_PUBLIC_API_URL;
+  const envAssistantId = process.env.NEXT_PUBLIC_ASSISTANT_ID;
+  const envAuthScheme = process.env.NEXT_PUBLIC_AUTH_SCHEME;
 
-  // Use URL params with env var fallbacks
   const [apiUrl, setApiUrl] = useQueryState("apiUrl", {
     defaultValue: envApiUrl || "",
   });
-  const [assistantId, setAssistantId] = useQueryState("assistantId", {
-    defaultValue: envAssistantId || "",
-  });
-  const [authScheme, setAuthScheme] = useQueryState("authScheme", {
+  const [assistantId, setAssistantId] = useQueryState("assistantId");
+  const [authScheme] = useQueryState("authScheme", {
     defaultValue: envAuthScheme || "",
   });
-  const [isAgentBuilder, setIsAgentBuilder] = useState(
-    () =>
-      (authScheme || envAuthScheme || "").toLowerCase() ===
-      AGENT_BUILDER_AUTH_SCHEME,
-  );
 
-  // For API key, use localStorage with env var fallback
-  const [apiKey, _setApiKey] = useState(() => {
-    const storedKey = getApiKey();
-    return storedKey || "";
-  });
-
-  const setApiKey = (key: string) => {
-    window.localStorage.setItem("lg:chat:apiKey", key);
-    _setApiKey(key);
-  };
-
-  // Determine final values to use, prioritizing URL params then env vars
   const finalApiUrl = apiUrl || envApiUrl;
   const finalAssistantId = assistantId || envAssistantId;
-  const finalAuthScheme = authScheme || envAuthScheme || "";
 
-  // Show the form if we: don't have an API URL, or don't have an assistant ID
+  // Tela de configuração inicial (se variáveis de env não estiverem definidas)
   if (!finalApiUrl || !finalAssistantId) {
     return (
       <div className="flex min-h-screen w-full items-center justify-center p-4">
-        <div className="animate-in fade-in-0 zoom-in-95 bg-background flex max-w-3xl flex-col rounded-lg border shadow-lg">
-          <div className="mt-14 flex flex-col gap-2 border-b p-6">
-            <div className="flex flex-col items-start gap-2">
-              <LangGraphLogoSVG className="h-7" />
-              <h1 className="text-xl font-semibold tracking-tight">
-                Agent Chat
-              </h1>
+        <div className="animate-in fade-in-0 zoom-in-95 bg-background flex max-w-xl flex-col rounded-lg border shadow-lg">
+          <div className="mt-12 flex flex-col gap-2 border-b p-6">
+            <div className="flex items-center gap-2">
+              <Cpu className="h-6 w-6" />
+              <h1 className="text-xl font-semibold tracking-tight">llm_router</h1>
             </div>
-            <p className="text-muted-foreground">
-              Welcome to Agent Chat! Before you get started, you need to enter
-              the URL of the deployment and the assistant / graph ID.
+            <p className="text-muted-foreground text-sm">
+              Informe a URL do servidor para começar.
             </p>
           </div>
+
+          {/* ⚠️ Não usar <form> em React artifacts — aqui é componente Next.js, ok */}
           <form
             onSubmit={(e) => {
               e.preventDefault();
-
-              const form = e.target as HTMLFormElement;
-              const formData = new FormData(form);
-              const apiUrl = formData.get("apiUrl") as string;
-              const assistantId = formData.get("assistantId") as string;
-              const apiKey = formData.get("apiKey") as string;
-
-              setApiUrl(apiUrl);
-              setApiKey(apiKey);
-              setAssistantId(assistantId);
-              setAuthScheme(isAgentBuilder ? AGENT_BUILDER_AUTH_SCHEME : "");
-
-              form.reset();
+              const fd = new FormData(e.target as HTMLFormElement);
+              setApiUrl((fd.get("apiUrl") as string).trim());
+              setAssistantId(
+                ((fd.get("assistantId") as string).trim()) || DEFAULT_ASSISTANT_ID
+              );
+              (e.target as HTMLFormElement).reset();
             }}
-            className="bg-muted/50 flex flex-col gap-6 p-6"
+            className="bg-muted/50 flex flex-col gap-5 p-6"
           >
             <div className="flex flex-col gap-2">
               <Label htmlFor="apiUrl">
-                Deployment URL<span className="text-rose-500">*</span>
+                URL do servidor <span className="text-rose-500">*</span>
               </Label>
-              <p className="text-muted-foreground text-sm">
-                This is the URL of your LangGraph deployment. Can be a local, or
-                production deployment.
+              <p className="text-muted-foreground text-xs">
+                Endereço onde o backend FastAPI está rodando.
               </p>
               <Input
                 id="apiUrl"
                 name="apiUrl"
                 className="bg-background"
                 defaultValue={apiUrl || DEFAULT_API_URL}
+                placeholder="http://localhost:8000"
                 required
               />
             </div>
 
             <div className="flex flex-col gap-2">
               <Label htmlFor="assistantId">
-                Assistant / Graph ID<span className="text-rose-500">*</span>
+                Graph ID <span className="text-rose-500">*</span>
               </Label>
-              <p className="text-muted-foreground text-sm">
-                This is the ID of the graph (can be the graph name), or
-                assistant to fetch threads from, and invoke when actions are
-                taken.
+              <p className="text-muted-foreground text-xs">
+                Identificador do grafo configurado no servidor (padrão:{" "}
+                <code>agent</code>).
               </p>
               <Input
                 id="assistantId"
                 name="assistantId"
                 className="bg-background"
                 defaultValue={assistantId || DEFAULT_ASSISTANT_ID}
+                placeholder="agent"
                 required
               />
             </div>
 
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="apiKey">LangSmith API Key</Label>
-              <p className="text-muted-foreground text-sm">
-                This is <strong>NOT</strong> required if using a local LangGraph
-                server. This value is stored in your browser's local storage and
-                is only used to authenticate requests sent to your LangGraph
-                server.
-              </p>
-              <PasswordInput
-                id="apiKey"
-                name="apiKey"
-                defaultValue={apiKey ?? ""}
-                className="bg-background"
-                placeholder="lsv2_pt_..."
-              />
-            </div>
-
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex flex-col gap-1">
-                  <Label htmlFor="agentBuilderEnabled">
-                    Built with Agent Builder
-                  </Label>
-                  <p className="text-muted-foreground text-sm">
-                    Enable this for Agent Builder deployments.
-                  </p>
-                </div>
-                <Switch
-                  id="agentBuilderEnabled"
-                  checked={isAgentBuilder}
-                  onCheckedChange={setIsAgentBuilder}
-                />
-              </div>
-            </div>
-
-            <div className="mt-2 flex justify-end">
-              <Button
-                type="submit"
-                size="lg"
-              >
-                Continue
-                <ArrowRight className="size-5" />
+            <div className="mt-1 flex justify-end">
+              <Button type="submit" size="lg">
+                Conectar <ArrowRight className="ml-1 size-4" />
               </Button>
             </div>
           </form>
@@ -304,21 +308,21 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
 
   return (
     <StreamSession
-      apiKey={apiKey}
       apiUrl={finalApiUrl}
       assistantId={finalAssistantId}
-      authScheme={finalAuthScheme || undefined}
+      authScheme={authScheme}
     >
       {children}
     </StreamSession>
   );
 };
 
-// Create a custom hook to use the context
+// ─── Hook ─────────────────────────────────────────────────────────────────────
+
 export const useStreamContext = (): StreamContextType => {
   const context = useContext(StreamContext);
-  if (context === undefined) {
-    throw new Error("useStreamContext must be used within a StreamProvider");
+  if (!context) {
+    throw new Error("useStreamContext deve ser usado dentro de <StreamProvider>");
   }
   return context;
 };
