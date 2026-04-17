@@ -1,18 +1,5 @@
+// src/providers/Stream.tsx
 "use client";
-
-/**
- * stream.tsx — Mikrotheos
- * ─────────────────────────────────────────────────────────────────────────────
- * Correções e adições vs versão anterior:
- *   ✅ Seletor de provider na abertura + botão para trocar a qualquer momento
- *   ✅ provider_name injetado em todo stream via body (backend espera isso)
- *   ✅ Histórico restaurado via backend (/threads/{id}/history via fetchStateHistory)
- *   ✅ Lista de threads via /threads/search (backend, não localStorage)
- *   ✅ provider_name salvo em sessionStorage para sobreviver a navegação
- *   ✅ Providers disponíveis buscados do backend via /info (extensível)
- *   ✅ StreamContextType expõe provider atual e setter
- * ─────────────────────────────────────────────────────────────────────────────
- */
 
 import React, {
   createContext,
@@ -20,60 +7,92 @@ import React, {
   useEffect,
   useCallback,
   useState,
+  useRef,
   type ReactNode,
 } from "react";
-import { useStream } from "@langchain/langgraph-sdk/react";
-import { type Message, type Thread } from "@langchain/langgraph-sdk";
-import {
-  uiMessageReducer,
-  isUIMessage,
-  isRemoveUIMessage,
-  type UIMessage,
-  type RemoveUIMessage,
-} from "@langchain/langgraph-sdk/react-ui";
-import { useQueryState } from "nuqs";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ArrowRight, Cpu, ChevronDown, Check } from "lucide-react";
-import { createClient } from "./client";
 import { getApiKey } from "@/lib/api-key";
 import { validate } from "uuid";
 import { toast } from "sonner";
+import { useStream, type UseStreamReturn } from "./use-stream";
+import {
+  isUIMessage,
+  isRemoveUIMessage,
+  uiMessageReducer,
+  buildThreadMetadata,  // ← adicionar
+  type Thread,
+  type UIMessage,
+  type RemoveUIMessage,
+} from "./types";
 
-// ─── Tipos ────────────────────────────────────────────────────────────────────
+// ─── useQueryState ────────────────────────────────────────────────────────────
 
-export type StateType = { messages: Message[]; ui?: UIMessage[] };
+// SUBSTITUIR useQueryState inteiro
+function useQueryState(
+  key: string,
+  options?: { defaultValue?: string }
+): [string, (value: string | null) => void] {
+  const getParam = (): string => {
+    if (typeof window === "undefined") return options?.defaultValue ?? "";
+    return (
+      new URLSearchParams(window.location.search).get(key) ??
+      options?.defaultValue ??
+      ""
+    );
+  };
 
-type UpdateType = {
-  messages?: Message[] | Message | string;
-  ui?: (UIMessage | RemoveUIMessage)[] | UIMessage | RemoveUIMessage;
-  context?: Record<string, unknown>;
-};
+  const [value, setValueState] = useState<string>(getParam);
 
-const useTypedStream = useStream<
-  StateType,
-  { UpdateType: UpdateType; CustomEventType: UIMessage | RemoveUIMessage }
->;
+  useEffect(() => {
+    // Escuta tanto popstate (back/forward) quanto pushState programático
+    const handler = () => setValueState(getParam());
+    window.addEventListener("popstate", handler);
 
-type BaseStreamType = ReturnType<typeof useTypedStream>;
+    // Monkey-patch de pushState para disparar evento customizado
+    const originalPush = window.history.pushState.bind(window.history);
+    window.history.pushState = (...args) => {
+      originalPush(...args);
+      window.dispatchEvent(new Event("locationchange"));
+    };
+    window.addEventListener("locationchange", handler);
 
-type StreamContextType = BaseStreamType & {
-  getThreads: () => Promise<Thread[]>;
-  provider: string;
-  setProvider: (p: string) => void;
-  availableProviders: string[];
-};
+    return () => {
+      window.removeEventListener("popstate", handler);
+      window.removeEventListener("locationchange", handler);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
 
-const StreamContext = createContext<StreamContextType | undefined>(undefined);
+  const setValue = useCallback(
+    (newValue: string | null) => {
+      const params = new URLSearchParams(window.location.search);
+      if (newValue === null || newValue === "") {
+        params.delete(key);
+      } else {
+        params.set(key, newValue);
+      }
+      const search = params.toString();
+      window.history.pushState(
+        {},
+        "",
+        window.location.pathname + (search ? `?${search}` : "") + window.location.hash
+      );
+      setValueState(newValue ?? options?.defaultValue ?? "");
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [key]
+  );
 
+  return [value, setValue];
+}
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
 const DEFAULT_API_URL = "http://localhost:8000";
 const DEFAULT_ASSISTANT_ID = "agent";
 const PROVIDER_SESSION_KEY = "mikrotheos:provider";
-
-// Providers padrão — serão sobrescritos pelo que vier do backend se /info retornar
 const FALLBACK_PROVIDERS = ["GoogleAIStudio", "DeepSeek", "Grok", "Venice"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -93,27 +112,41 @@ async function checkServerStatus(apiUrl: string): Promise<boolean> {
   }
 }
 
-/**
- * Busca providers disponíveis do backend via GET /info.
- * O backend retorna { version, graphs, ... } — se no futuro expor providers,
- * basta adicionar ao /info e isso já funciona.
- * Por ora retorna FALLBACK_PROVIDERS.
- */
-async function fetchAvailableProviders(apiUrl: string, apiKey?: string): Promise<string[]> {
+// SUBSTITUIR a função fetchAvailableProviders
+async function fetchAvailableProviders(
+  apiUrl: string,
+  apiKey?: string
+): Promise<string[]> {
   try {
     const headers: Record<string, string> = {};
     if (apiKey) headers["x-api-key"] = apiKey;
     const res = await fetch(`${apiUrl}/info`, { headers });
-    if (!res.ok) return FALLBACK_PROVIDERS;
+    if (!res.ok) {
+      console.warn(`[providers] /info retornou ${res.status}, usando fallback`);
+      return FALLBACK_PROVIDERS;
+    }
     const data = await res.json();
-    // Se o backend expuser providers no futuro: data.providers
-    return Array.isArray(data.providers) && data.providers.length > 0
-      ? data.providers
-      : FALLBACK_PROVIDERS;
-  } catch {
+    if (Array.isArray(data.providers) && data.providers.length > 0) {
+      return data.providers as string[];
+    }
+    console.info("[providers] /info não retornou providers, usando fallback");
+    return FALLBACK_PROVIDERS;
+  } catch (err) {
+    console.warn("[providers] Falha ao buscar /info:", err, "usando fallback");
     return FALLBACK_PROVIDERS;
   }
 }
+
+// ─── Contexto ─────────────────────────────────────────────────────────────────
+
+type StreamContextType = UseStreamReturn & {
+  getThreads: () => Promise<Thread[]>;
+  provider: string;
+  setProvider: (p: string) => void;
+  availableProviders: string[];
+};
+
+const StreamContext = createContext<StreamContextType | undefined>(undefined);
 
 // ─── ProviderSelector ─────────────────────────────────────────────────────────
 
@@ -121,7 +154,7 @@ interface ProviderSelectorProps {
   providers: string[];
   onSelect: (p: string) => void;
   current?: string;
-  inline?: boolean; // true = widget compacto para usar dentro do app
+  inline?: boolean;
 }
 
 const ProviderSelector: React.FC<ProviderSelectorProps> = ({
@@ -149,14 +182,12 @@ const ProviderSelector: React.FC<ProviderSelectorProps> = ({
             {providers.map((p) => (
               <button
                 key={p}
-                onClick={() => {
-                  onSelect(p);
-                  setOpen(false);
-                }}
+                onClick={() => { onSelect(p); setOpen(false); }}
                 className="flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-muted"
               >
-                {p === current && <Check className="h-3.5 w-3.5 text-primary" />}
-                {p !== current && <span className="w-3.5" />}
+                {p === current
+                  ? <Check className="h-3.5 w-3.5 text-primary" />
+                  : <span className="w-3.5" />}
                 {p}
               </button>
             ))}
@@ -166,7 +197,6 @@ const ProviderSelector: React.FC<ProviderSelectorProps> = ({
     );
   }
 
-  // Tela inicial de seleção
   return (
     <div className="flex min-h-screen w-full items-center justify-center p-4">
       <div className="animate-in fade-in-0 zoom-in-95 bg-background flex max-w-sm flex-col gap-6 rounded-lg border p-8 shadow-lg">
@@ -179,7 +209,6 @@ const ProviderSelector: React.FC<ProviderSelectorProps> = ({
             Escolha o modelo de linguagem para esta sessão.
           </p>
         </div>
-
         <div className="flex flex-col gap-2">
           {providers.map((p) => (
             <button
@@ -221,57 +250,55 @@ const StreamSession: React.FC<StreamSessionProps> = ({
   const [threadId, setThreadId] = useQueryState("threadId");
   const apiKey = getApiKey() ?? process.env.NEXT_PUBLIC_API_KEY ?? undefined;
 
-  /**
-   * Busca threads do backend.
-   * Fonte da verdade = /threads/search no servidor (lê threads_db.json).
-   */
+// SUBSTITUIR dentro de StreamSession
   const getThreads = useCallback(async (): Promise<Thread[]> => {
     try {
-      const client = createClient(apiUrl, apiKey, authScheme);
-      return await client.threads.search({
-        metadata: getThreadSearchMetadata(assistantId),
-        limit: 100,
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (apiKey) headers["x-api-key"] = apiKey;
+      // FIX 6: authScheme aplicado como Bearer se presente
+      if (authScheme) headers["Authorization"] = `${authScheme} ${apiKey ?? ""}`;
+
+      const res = await fetch(`${apiUrl}/threads/search`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          metadata: buildThreadMetadata(assistantId),
+          limit: 100,
+        }),
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return (await res.json()) as Thread[];
     } catch (err) {
-      console.warn("[StreamSession] Falha ao buscar threads do backend:", err);
+      console.warn("[StreamSession] Falha ao buscar threads:", err);
       return [];
     }
   }, [apiUrl, assistantId, authScheme, apiKey]);
 
-  // ─── useStream (SDK LangGraph) ────────────────────────────────────────────
-  const streamValue = useTypedStream({
+  const streamValue = useStream({
     apiUrl,
     apiKey,
     assistantId,
-    threadId: threadId ?? null,
+    threadId: threadId || null,
     fetchStateHistory: true,
-
-    /**
-     * provider_name é injetado em CADA chamada via body.
-     * O backend lê body.provider_name com prioridade sobre metadata da thread.
-     */
-    input: {
-      provider_name: provider,
-    },
-
-    onCustomEvent: (event, options) => {
+    // SUBSTITUIR dentro de StreamSession → useStream({...})
+    extraBody: provider
+      ? { provider_name: provider }
+      : undefined,
+    onCustomEvent: (event, opts) => {
       if (isUIMessage(event) || isRemoveUIMessage(event)) {
-        options.mutate((prev) => ({
+        opts.mutate((prev) => ({
           ...prev,
           ui: uiMessageReducer(prev.ui ?? [], event),
         }));
       }
     },
-
     onThreadId: (id) => {
       setThreadId(id);
-      setTimeout(() => {
-        getThreads().catch(console.error);
-      }, 1000);
     },
   });
 
-  // ─── Verifica status do servidor ─────────────────────────────────────────
   useEffect(() => {
     checkServerStatus(apiUrl).then((ok) => {
       if (!ok) {
@@ -300,29 +327,21 @@ const StreamSession: React.FC<StreamSessionProps> = ({
   );
 };
 
-// ─── StreamProvider (ponto de entrada) ───────────────────────────────────────
+// ─── StreamProvider ───────────────────────────────────────────────────────────
 
-export const StreamProvider: React.FC<{ children: ReactNode }> = ({
-  children,
-}) => {
+export const StreamProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const envApiUrl = process.env.NEXT_PUBLIC_API_URL;
   const envAssistantId = process.env.NEXT_PUBLIC_ASSISTANT_ID;
   const envAuthScheme = process.env.NEXT_PUBLIC_AUTH_SCHEME;
 
-  const [apiUrl, setApiUrl] = useQueryState("apiUrl", {
-    defaultValue: envApiUrl || "",
-  });
+  const [apiUrl, setApiUrl] = useQueryState("apiUrl", { defaultValue: envApiUrl || "" });
   const [assistantId, setAssistantId] = useQueryState("assistantId");
-  const [authScheme] = useQueryState("authScheme", {
-    defaultValue: envAuthScheme || "",
-  });
+  const [authScheme] = useQueryState("authScheme", { defaultValue: envAuthScheme || "" });
 
   const finalApiUrl = apiUrl || envApiUrl;
   const finalAssistantId = assistantId || envAssistantId;
 
-  // ─── Estado do provider ──────────────────────────────────────────────────
   const [provider, setProviderState] = useState<string>(() => {
-    // Tenta restaurar da sessão anterior
     if (typeof window !== "undefined") {
       return sessionStorage.getItem(PROVIDER_SESSION_KEY) ?? "";
     }
@@ -338,14 +357,12 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     }
   }, []);
 
-  // Busca providers disponíveis quando a URL estiver definida
   useEffect(() => {
     if (!finalApiUrl) return;
     const apiKey = getApiKey() ?? process.env.NEXT_PUBLIC_API_KEY ?? undefined;
     fetchAvailableProviders(finalApiUrl, apiKey).then(setAvailableProviders);
   }, [finalApiUrl]);
 
-  // ─── Tela de configuração de URL ─────────────────────────────────────────
   if (!finalApiUrl || !finalAssistantId) {
     return (
       <div className="flex min-h-screen w-full items-center justify-center p-4">
@@ -359,15 +376,12 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
               Informe a URL do servidor para começar.
             </p>
           </div>
-
           <form
             onSubmit={(e) => {
               e.preventDefault();
               const fd = new FormData(e.target as HTMLFormElement);
               setApiUrl((fd.get("apiUrl") as string).trim());
-              setAssistantId(
-                ((fd.get("assistantId") as string).trim()) || DEFAULT_ASSISTANT_ID
-              );
+              setAssistantId(((fd.get("assistantId") as string).trim()) || DEFAULT_ASSISTANT_ID);
               (e.target as HTMLFormElement).reset();
             }}
             className="bg-muted/50 flex flex-col gap-5 p-6"
@@ -385,7 +399,6 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
                 required
               />
             </div>
-
             <div className="flex flex-col gap-2">
               <Label htmlFor="assistantId">
                 Graph ID <span className="text-rose-500">*</span>
@@ -399,7 +412,6 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
                 required
               />
             </div>
-
             <div className="mt-1 flex justify-end">
               <Button type="submit" size="lg">
                 Conectar <ArrowRight className="ml-1 size-4" />
@@ -411,14 +423,8 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     );
   }
 
-  // ─── Tela de seleção de provider (primeira vez ou sem sessão salva) ───────
   if (!provider) {
-    return (
-      <ProviderSelector
-        providers={availableProviders}
-        onSelect={setProvider}
-      />
-    );
+    return <ProviderSelector providers={availableProviders} onSelect={setProvider} />;
   }
 
   return (
@@ -435,7 +441,7 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
   );
 };
 
-// ─── Hook ─────────────────────────────────────────────────────────────────────
+// ─── Hooks públicos ───────────────────────────────────────────────────────────
 
 export const useStreamContext = (): StreamContextType => {
   const context = useContext(StreamContext);
@@ -445,16 +451,8 @@ export const useStreamContext = (): StreamContextType => {
   return context;
 };
 
-/**
- * Hook de conveniência para acessar o seletor de provider inline.
- * Use onde quiser exibir o botão de troca de provider na UI:
- *
- *   const { ProviderSwitcher } = useProviderSwitcher();
- *   return <header>...<ProviderSwitcher /></header>
- */
 export const useProviderSwitcher = () => {
   const { provider, setProvider, availableProviders } = useStreamContext();
-
   const ProviderSwitcher: React.FC = () => (
     <ProviderSelector
       providers={availableProviders}
@@ -463,7 +461,6 @@ export const useProviderSwitcher = () => {
       inline
     />
   );
-
   return { provider, setProvider, ProviderSwitcher };
 };
 
