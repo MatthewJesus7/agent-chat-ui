@@ -93,7 +93,8 @@ function useQueryState(
 const DEFAULT_API_URL = "http://localhost:8000";
 const DEFAULT_ASSISTANT_ID = "agent";
 const PROVIDER_SESSION_KEY = "mikrotheos:provider";
-const FALLBACK_PROVIDERS = ["GoogleAIStudio", "DeepSeek", "Grok", "Venice"];
+const FALLBACK_PROVIDERS = ["Grok"];
+// const FALLBACK_PROVIDERS = ["venice"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
