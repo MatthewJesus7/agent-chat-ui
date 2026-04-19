@@ -46,6 +46,8 @@ import {
   useArtifactContext,
 } from "./artifact";
 
+import { useProviderSwitcher } from "@/providers/Stream";
+
 function StickyToBottomContent(props: {
   content: ReactNode;
   footer?: ReactNode;
@@ -112,6 +114,8 @@ function OpenGitHubRepo() {
 }
 
 export function Thread() {
+  const { ProviderSwitcher } = useProviderSwitcher();
+
   const [artifactContext, setArtifactContext] = useArtifactContext();
   const [artifactOpen, closeArtifact] = useArtifactOpen();
 
@@ -499,6 +503,7 @@ export function Thread() {
                             </Label>
                           </div>
                         </div>
+                        
                         <Label
                           htmlFor="file-input"
                           className="flex cursor-pointer items-center gap-2"
@@ -516,6 +521,7 @@ export function Thread() {
                           accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
                           className="hidden"
                         />
+                        <ProviderSwitcher />
                         {stream.isLoading ? (
                           <Button
                             key="stop"
