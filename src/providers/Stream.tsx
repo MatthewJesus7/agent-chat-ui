@@ -93,8 +93,7 @@ function useQueryState(
 const DEFAULT_API_URL = "http://localhost:8000";
 const DEFAULT_ASSISTANT_ID = "agent";
 const PROVIDER_SESSION_KEY = "mikrotheos:provider";
-const FALLBACK_PROVIDERS = ["Grok"];
-// const FALLBACK_PROVIDERS = ["venice"];
+const FALLBACK_PROVIDERS = ["Grok", "venice", "glm-4.7-flash-heretic", "zai-org-glm-4.6"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -342,12 +341,9 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const finalApiUrl = apiUrl || envApiUrl;
   const finalAssistantId = assistantId || envAssistantId;
 
-  const [provider, setProviderState] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      return sessionStorage.getItem(PROVIDER_SESSION_KEY) ?? "";
-    }
-    return "";
-  });
+
+
+  const [provider, setProviderState] = useState<string>("");
 
   const [availableProviders, setAvailableProviders] = useState<string[]>(FALLBACK_PROVIDERS);
 
