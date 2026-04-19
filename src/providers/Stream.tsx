@@ -1,4 +1,3 @@
-// src/providers/Stream.tsx
 "use client";
 
 import React, {
@@ -7,7 +6,6 @@ import React, {
   useEffect,
   useCallback,
   useState,
-  useRef,
   type ReactNode,
 } from "react";
 import { Input } from "@/components/ui/input";
@@ -15,14 +13,12 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { ArrowRight, Cpu, ChevronDown, Check } from "lucide-react";
 import { getApiKey } from "@/lib/api-key";
-import { validate } from "uuid";
 import { toast } from "sonner";
 import { useStream, type UseStreamReturn } from "./use-stream";
 import {
   isUIMessage,
   isRemoveUIMessage,
   uiMessageReducer,
-  buildThreadMetadata,  // ← adicionar
   type Thread,
   type UIMessage,
   type RemoveUIMessage,
@@ -30,7 +26,6 @@ import {
 
 // ─── useQueryState ────────────────────────────────────────────────────────────
 
-// SUBSTITUIR useQueryState inteiro
 function useQueryState(
   key: string,
   options?: { defaultValue?: string }
@@ -47,18 +42,14 @@ function useQueryState(
   const [value, setValueState] = useState<string>(getParam);
 
   useEffect(() => {
-    // Escuta tanto popstate (back/forward) quanto pushState programático
     const handler = () => setValueState(getParam());
     window.addEventListener("popstate", handler);
-
-    // Monkey-patch de pushState para disparar evento customizado
     const originalPush = window.history.pushState.bind(window.history);
     window.history.pushState = (...args) => {
       originalPush(...args);
       window.dispatchEvent(new Event("locationchange"));
     };
     window.addEventListener("locationchange", handler);
-
     return () => {
       window.removeEventListener("popstate", handler);
       window.removeEventListener("locationchange", handler);
@@ -88,20 +79,43 @@ function useQueryState(
 
   return [value, setValue];
 }
+
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
 const DEFAULT_API_URL = "http://localhost:8000";
 const DEFAULT_ASSISTANT_ID = "agent";
 const PROVIDER_SESSION_KEY = "mikrotheos:provider";
-const FALLBACK_PROVIDERS = ["Grok", "venice", "glm-4.7-flash-heretic", "zai-org-glm-4.6"];
+const THREADS_STORAGE_KEY = "mikrotheos:threads";
+const FALLBACK_PROVIDERS = ["Grok", "venice", "glm-4.7-flash-heretic"];
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers localStorage ─────────────────────────────────────────────────────
 
-function getThreadSearchMetadata(assistantId: string) {
-  return validate(assistantId)
-    ? { assistant_id: assistantId }
-    : { graph_id: assistantId };
+function loadThreadsFromStorage(): Thread[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(THREADS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
 }
+
+function upsertThreadInStorage(threadId: string): void {
+  if (typeof window === "undefined") return;
+  const threads = loadThreadsFromStorage();
+  const exists = threads.find((t) => t.thread_id === threadId);
+  if (!exists) {
+    threads.unshift({
+      thread_id: threadId,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      values: { messages: [] },
+    });
+    localStorage.setItem(THREADS_STORAGE_KEY, JSON.stringify(threads));
+  }
+}
+
+// ─── Helpers servidor ─────────────────────────────────────────────────────────
 
 async function checkServerStatus(apiUrl: string): Promise<boolean> {
   try {
@@ -112,7 +126,6 @@ async function checkServerStatus(apiUrl: string): Promise<boolean> {
   }
 }
 
-// SUBSTITUIR a função fetchAvailableProviders
 async function fetchAvailableProviders(
   apiUrl: string,
   apiKey?: string
@@ -176,7 +189,6 @@ const ProviderSelector: React.FC<ProviderSelectorProps> = ({
           <span>{current ?? "Selecionar"}</span>
           <ChevronDown className="h-3 w-3 text-muted-foreground" />
         </button>
-
         {open && (
           <div className="absolute right-0 top-full z-50 mt-1 min-w-[160px] rounded-md border bg-background shadow-lg">
             {providers.map((p) => (
@@ -226,6 +238,20 @@ const ProviderSelector: React.FC<ProviderSelectorProps> = ({
   );
 };
 
+// ─── ProviderSwitcher (fora do hook — evita recriar a cada render) ─────────────
+
+const ProviderSwitcherComponent: React.FC = () => {
+  const { provider, setProvider, availableProviders } = useStreamContext();
+  return (
+    <ProviderSelector
+      providers={availableProviders}
+      onSelect={setProvider}
+      current={provider}
+      inline
+    />
+  );
+};
+
 // ─── StreamSession ────────────────────────────────────────────────────────────
 
 interface StreamSessionProps {
@@ -250,31 +276,10 @@ const StreamSession: React.FC<StreamSessionProps> = ({
   const [threadId, setThreadId] = useQueryState("threadId");
   const apiKey = getApiKey() ?? process.env.NEXT_PUBLIC_API_KEY ?? undefined;
 
-// SUBSTITUIR dentro de StreamSession
+  // ← lê do localStorage, não do backend
   const getThreads = useCallback(async (): Promise<Thread[]> => {
-    try {
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (apiKey) headers["x-api-key"] = apiKey;
-      // FIX 6: authScheme aplicado como Bearer se presente
-      if (authScheme) headers["Authorization"] = `${authScheme} ${apiKey ?? ""}`;
-
-      const res = await fetch(`${apiUrl}/threads/search`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          metadata: buildThreadMetadata(assistantId),
-          limit: 100,
-        }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return (await res.json()) as Thread[];
-    } catch (err) {
-      console.warn("[StreamSession] Falha ao buscar threads:", err);
-      return [];
-    }
-  }, [apiUrl, assistantId, authScheme, apiKey]);
+    return loadThreadsFromStorage();
+  }, []);
 
   const streamValue = useStream({
     apiUrl,
@@ -282,10 +287,7 @@ const StreamSession: React.FC<StreamSessionProps> = ({
     assistantId,
     threadId: threadId || null,
     fetchStateHistory: true,
-    // SUBSTITUIR dentro de StreamSession → useStream({...})
-    extraBody: provider
-      ? { provider_name: provider }
-      : undefined,
+    extraBody: provider ? { provider_name: provider } : undefined,
     onCustomEvent: (event, opts) => {
       if (isUIMessage(event) || isRemoveUIMessage(event)) {
         opts.mutate((prev) => ({
@@ -296,6 +298,7 @@ const StreamSession: React.FC<StreamSessionProps> = ({
     },
     onThreadId: (id) => {
       setThreadId(id);
+      upsertThreadInStorage(id); // ← salva no localStorage
     },
   });
 
@@ -341,10 +344,7 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const finalApiUrl = apiUrl || envApiUrl;
   const finalAssistantId = assistantId || envAssistantId;
 
-
-
   const [provider, setProviderState] = useState<string>("");
-
   const [availableProviders, setAvailableProviders] = useState<string[]>(FALLBACK_PROVIDERS);
 
   const setProvider = useCallback((p: string) => {
@@ -449,16 +449,8 @@ export const useStreamContext = (): StreamContextType => {
 };
 
 export const useProviderSwitcher = () => {
-  const { provider, setProvider, availableProviders } = useStreamContext();
-  const ProviderSwitcher: React.FC = () => (
-    <ProviderSelector
-      providers={availableProviders}
-      onSelect={setProvider}
-      current={provider}
-      inline
-    />
-  );
-  return { provider, setProvider, ProviderSwitcher };
+  const { provider, setProvider } = useStreamContext();
+  return { provider, setProvider, ProviderSwitcher: ProviderSwitcherComponent };
 };
 
 export default StreamContext;
