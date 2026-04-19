@@ -10,38 +10,26 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { PanelRightOpen, PanelRightClose } from "lucide-react";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 
-const THREADS_STORAGE_KEY = "mikrotheos:threads";
-
-function saveThreadToStorage(threadId: string): void {
-  if (typeof window === "undefined") return;
-  try {
-    const raw = localStorage.getItem(THREADS_STORAGE_KEY);
-    const threads: Thread[] = raw ? JSON.parse(raw) : [];
-    if (!threads.find((t) => t.thread_id === threadId)) {
-      threads.unshift({
-        thread_id: threadId,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        values: { messages: [] },
-      });
-      localStorage.setItem(THREADS_STORAGE_KEY, JSON.stringify(threads));
-    }
-  } catch {
-    // no-op
-  }
-}
-
 function getThreadLabel(t: Thread): string {
+  // 1. metadata.label — salvo no momento da criação pelo stream.tsx
+  const label = (t.metadata as any)?.label;
+  if (label && label !== t.thread_id) return label;
+
+  // 2. fallback: primeira mensagem humana nas values (threads antigos sem metadata)
   const messages = t.values?.messages;
-  if (!Array.isArray(messages) || messages.length === 0) return t.thread_id;
-  const first = messages.find((m: any) => m.role === "user" || m.type === "human");
-  if (!first) return t.thread_id;
-  const content = first.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const text = content.find((b: any) => b.type === "text");
-    return text?.text ?? t.thread_id;
+  if (Array.isArray(messages) && messages.length > 0) {
+    const first = messages.find((m: any) => m.role === "user" || m.type === "human");
+    if (first) {
+      const content = first.content;
+      if (typeof content === "string") return content;
+      if (Array.isArray(content)) {
+        const text = content.find((b: any) => b.type === "text");
+        if (text?.text) return text.text;
+      }
+    }
   }
+
+  // 3. último recurso: hash do threadId
   return t.thread_id;
 }
 
@@ -118,16 +106,9 @@ export default function ThreadHistory() {
     useThreads();
 
   useEffect(() => {
-    // Se tem threadId na URL, garante que está salvo no localStorage
-    // antes de carregar a lista — resolve o race condition com onThreadId
-    if (threadId) saveThreadToStorage(threadId);
-
     setThreadsLoading(true);
     getThreads()
-      .then((data) => {
-        console.log("[ThreadHistory] threads recebidos:", data);
-        setThreads(data);
-      })
+      .then(setThreads)
       .catch(console.error)
       .finally(() => setThreadsLoading(false));
   }, [threadId]);

@@ -1,9 +1,9 @@
 import { v4 as uuidv4 } from "uuid";
-import { ReactNode, useEffect, useRef } from "react";
-import { motion } from "framer-motion";
+import { ReactNode, useEffect, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useStreamContext } from "@/providers/Stream";
-import { useState, FormEvent } from "react";
+import { FormEvent } from "react";
 import { Button } from "../ui/button";
 import { Checkpoint, Message } from "@langchain/langgraph-sdk";
 import { AssistantMessage, AssistantMessageLoading } from "./messages/ai";
@@ -12,7 +12,6 @@ import {
   DO_NOT_RENDER_ID_PREFIX,
   ensureToolCallsHaveResponses,
 } from "@/lib/ensure-tool-responses";
-import { LangGraphLogoSVG } from "../icons/langgraph";
 import { TooltipIconButton } from "./tooltip-icon-button";
 import {
   ArrowDown,
@@ -22,6 +21,13 @@ import {
   SquarePen,
   XIcon,
   Plus,
+  Moon,
+  Sun,
+  Settings2,
+  Eye,
+  EyeOff,
+  Cpu,
+  Paperclip,
 } from "lucide-react";
 import { useQueryState, parseAsBoolean } from "nuqs";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
@@ -30,13 +36,24 @@ import { toast } from "sonner";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { Label } from "../ui/label";
 import { Switch } from "../ui/switch";
-import { GitHubSVG } from "../icons/github";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "../ui/popover";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "../ui/sheet";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "../ui/tooltip";
+import { Badge } from "../ui/badge";
 import { useFileUpload } from "@/hooks/use-file-upload";
 import { ContentBlocksPreview } from "./ContentBlocksPreview";
 import {
@@ -45,9 +62,24 @@ import {
   ArtifactTitle,
   useArtifactContext,
 } from "./artifact";
-
 import { useProviderSwitcher } from "@/providers/Stream";
 
+// ─── Dark mode hook ───────────────────────────────────────────────────────────
+function useDarkMode() {
+  const [dark, setDark] = useState(() =>
+    typeof window !== "undefined"
+      ? document.documentElement.classList.contains("dark")
+      : false,
+  );
+  const toggle = () => {
+    const next = !dark;
+    document.documentElement.classList.toggle("dark", next);
+    setDark(next);
+  };
+  return { dark, toggle };
+}
+
+// ─── StickyToBottomContent ────────────────────────────────────────────────────
 function StickyToBottomContent(props: {
   content: ReactNode;
   footer?: ReactNode;
@@ -61,21 +93,17 @@ function StickyToBottomContent(props: {
       style={{ width: "100%", height: "100%" }}
       className={props.className}
     >
-      <div
-        ref={context.contentRef}
-        className={props.contentClassName}
-      >
+      <div ref={context.contentRef} className={props.contentClassName}>
         {props.content}
       </div>
-
       {props.footer}
     </div>
   );
 }
 
+// ─── ScrollToBottom ───────────────────────────────────────────────────────────
 function ScrollToBottom(props: { className?: string }) {
   const { isAtBottom, scrollToBottom } = useStickToBottomContext();
-
   if (isAtBottom) return null;
   return (
     <Button
@@ -89,30 +117,205 @@ function ScrollToBottom(props: { className?: string }) {
   );
 }
 
-function OpenGitHubRepo() {
+// ─── AppLogo ──────────────────────────────────────────────────────────────────
+function AppLogo({ size = 28 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 28 28"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-label="Agent Chat logo"
+    >
+      <rect width="28" height="28" rx="8" className="fill-foreground/10 dark:fill-foreground/15" />
+      <circle cx="14" cy="14" r="5" className="fill-foreground/80" />
+      <circle cx="14" cy="14" r="2.5" className="fill-background" />
+      <path
+        d="M14 4v3M14 21v3M4 14h3M21 14h3"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        className="stroke-foreground/50"
+      />
+    </svg>
+  );
+}
+
+// ─── DarkModeToggle ───────────────────────────────────────────────────────────
+function DarkModeToggle() {
+  const { dark, toggle } = useDarkMode();
   return (
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger asChild>
-          <a
-            href="https://github.com/langchain-ai/agent-chat-ui"
-            target="_blank"
-            className="flex items-center justify-center"
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 rounded-full"
+            onClick={toggle}
+            aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
           >
-            <GitHubSVG
-              width="24"
-              height="24"
-            />
-          </a>
+            <AnimatePresence mode="wait" initial={false}>
+              {dark ? (
+                <motion.span
+                  key="sun"
+                  initial={{ rotate: -90, opacity: 0, scale: 0.7 }}
+                  animate={{ rotate: 0, opacity: 1, scale: 1 }}
+                  exit={{ rotate: 90, opacity: 0, scale: 0.7 }}
+                  transition={{ duration: 0.2 }}
+                  className="flex items-center justify-center"
+                >
+                  <Sun className="h-4 w-4" />
+                </motion.span>
+              ) : (
+                <motion.span
+                  key="moon"
+                  initial={{ rotate: 90, opacity: 0, scale: 0.7 }}
+                  animate={{ rotate: 0, opacity: 1, scale: 1 }}
+                  exit={{ rotate: -90, opacity: 0, scale: 0.7 }}
+                  transition={{ duration: 0.2 }}
+                  className="flex items-center justify-center"
+                >
+                  <Moon className="h-4 w-4" />
+                </motion.span>
+              )}
+            </AnimatePresence>
+          </Button>
         </TooltipTrigger>
         <TooltipContent side="left">
-          <p>Open GitHub repo</p>
+          <p>{dark ? "Light mode" : "Dark mode"}</p>
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
   );
 }
 
+// ─── ProviderSheet ────────────────────────────────────────────────────────────
+// Wraps the ProviderSwitcher inside a nice Sheet for mobile/desktop
+function ProviderSheet({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 rounded-full"
+              onClick={() => setOpen(true)}
+              aria-label="Switch AI provider"
+            >
+              <Cpu className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            <p>Switch AI provider</p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+
+      <Sheet open={open} onOpenChange={setOpen}>
+        <SheetContent side="bottom" className="rounded-t-2xl pb-8">
+          <SheetHeader className="mb-4">
+            <SheetTitle className="text-left text-base font-semibold">
+              AI Provider
+            </SheetTitle>
+          </SheetHeader>
+          <div className="flex flex-col gap-3">{children}</div>
+        </SheetContent>
+      </Sheet>
+    </>
+  );
+}
+
+// ─── MobileToolbar ────────────────────────────────────────────────────────────
+// Consolidates the 4 cramped items into a clean "+" popover on mobile
+function MobileToolbar({
+  hideToolCalls,
+  setHideToolCalls,
+  handleFileUpload,
+  providerSwitcher,
+}: {
+  hideToolCalls: boolean | null;
+  setHideToolCalls: (v: boolean) => void;
+  handleFileUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  providerSwitcher: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 shrink-0 rounded-full"
+          aria-label="More options"
+        >
+          <Settings2 className="h-4 w-4" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="start"
+        className="w-56 rounded-2xl p-2 shadow-xl"
+      >
+        <div className="flex flex-col gap-1">
+          {/* Hide tool calls */}
+          <button
+            className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors hover:bg-muted"
+            onClick={() => setHideToolCalls(!hideToolCalls)}
+          >
+            {hideToolCalls ? (
+              <EyeOff className="h-4 w-4 shrink-0 text-muted-foreground" />
+            ) : (
+              <Eye className="h-4 w-4 shrink-0 text-muted-foreground" />
+            )}
+            <span>{hideToolCalls ? "Show" : "Hide"} tool calls</span>
+            {hideToolCalls && (
+              <Badge variant="secondary" className="ml-auto text-[10px]">
+                ON
+              </Badge>
+            )}
+          </button>
+
+          {/* Upload file */}
+          <button
+            className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors hover:bg-muted"
+            onClick={() => {
+              setOpen(false);
+              fileRef.current?.click();
+            }}
+          >
+            <Paperclip className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span>Attach PDF or image</span>
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            onChange={handleFileUpload}
+            multiple
+            accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
+            className="hidden"
+          />
+
+          <div className="my-1 h-px bg-border" />
+
+          {/* Provider switcher inline */}
+          <div className="flex items-center gap-3 rounded-xl px-3 py-2.5">
+            <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span className="text-sm">AI Provider</span>
+            <div className="ml-auto">{providerSwitcher}</div>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+// ─── Thread ───────────────────────────────────────────────────────────────────
 export function Thread() {
   const { ProviderSwitcher } = useProviderSwitcher();
 
@@ -135,12 +338,12 @@ export function Thread() {
     handleFileUpload,
     dropRef,
     removeBlock,
-    resetBlocks: _resetBlocks,
     dragOver,
     handlePaste,
   } = useFileUpload();
   const [firstTokenReceived, setFirstTokenReceived] = useState(false);
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
+  const isMobile = useMediaQuery("(max-width: 639px)");
 
   const stream = useStreamContext();
   const messages = stream.messages;
@@ -150,8 +353,6 @@ export function Thread() {
 
   const setThreadId = (id: string | null) => {
     _setThreadId(id);
-
-    // close artifact and reset artifact context
     closeArtifact();
     setArtifactContext({});
   };
@@ -163,12 +364,7 @@ export function Thread() {
     }
     try {
       const message = (stream.error as any).message;
-      if (!message || lastError.current === message) {
-        // Message has already been logged. do not modify ref, return early.
-        return;
-      }
-
-      // Message is defined, and it has not been logged yet. Save it, and send the error
+      if (!message || lastError.current === message) return;
       lastError.current = message;
       toast.error("An error occurred. Please try again.", {
         description: (
@@ -184,7 +380,6 @@ export function Thread() {
     }
   }, [stream.error]);
 
-  // TODO: this should be part of the useStream hook
   const prevMessageLength = useRef(0);
   useEffect(() => {
     if (
@@ -194,7 +389,6 @@ export function Thread() {
     ) {
       setFirstTokenReceived(true);
     }
-
     prevMessageLength.current = messages.length;
   }, [messages]);
 
@@ -214,7 +408,6 @@ export function Thread() {
     };
 
     const toolMessages = ensureToolCallsHaveResponses(stream.messages);
-
     const context =
       Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
 
@@ -243,7 +436,6 @@ export function Thread() {
   const handleRegenerate = (
     parentCheckpoint: Checkpoint | null | undefined,
   ) => {
-    // Do this so the loading state is correct
     prevMessageLength.current = prevMessageLength.current - 1;
     setFirstTokenReceived(false);
     stream.submit(undefined, {
@@ -260,32 +452,23 @@ export function Thread() {
   );
 
   return (
-    <div className="flex h-screen w-full overflow-hidden">
+    <div className="flex h-screen w-full overflow-hidden bg-background text-foreground transition-colors duration-300">
+      {/* ── Sidebar history ── */}
       <div className="relative hidden lg:flex">
         <motion.div
-          className="absolute z-20 h-full overflow-hidden border-r bg-white"
+          className="absolute z-20 h-full overflow-hidden border-r bg-background/95 backdrop-blur-sm"
           style={{ width: 300 }}
-          animate={
-            isLargeScreen
-              ? { x: chatHistoryOpen ? 0 : -300 }
-              : { x: chatHistoryOpen ? 0 : -300 }
-          }
+          animate={{ x: chatHistoryOpen ? 0 : -300 }}
           initial={{ x: -300 }}
-          transition={
-            isLargeScreen
-              ? { type: "spring", stiffness: 300, damping: 30 }
-              : { duration: 0 }
-          }
+          transition={{ type: "spring", stiffness: 300, damping: 30 }}
         >
-          <div
-            className="relative h-full"
-            style={{ width: 300 }}
-          >
+          <div className="relative h-full" style={{ width: 300 }}>
             <ThreadHistory />
           </div>
         </motion.div>
       </div>
 
+      {/* ── Main layout ── */}
       <div
         className={cn(
           "grid w-full grid-cols-[1fr_0fr] transition-all duration-500",
@@ -306,19 +489,17 @@ export function Thread() {
                 : "100%"
               : "100%",
           }}
-          transition={
-            isLargeScreen
-              ? { type: "spring", stiffness: 300, damping: 30 }
-              : { duration: 0 }
-          }
+          transition={{ type: "spring", stiffness: 300, damping: 30 }}
         >
+          {/* ── Header (not started) ── */}
           {!chatStarted && (
             <div className="absolute top-0 left-0 z-10 flex w-full items-center justify-between gap-3 p-2 pl-4">
               <div>
                 {(!chatHistoryOpen || !isLargeScreen) && (
                   <Button
-                    className="hover:bg-gray-100"
+                    className="hover:bg-accent rounded-full"
                     variant="ghost"
+                    size="icon"
                     onClick={() => setChatHistoryOpen((p) => !p)}
                   >
                     {chatHistoryOpen ? (
@@ -329,63 +510,53 @@ export function Thread() {
                   </Button>
                 )}
               </div>
-              <div className="absolute top-2 right-4 flex items-center">
-                <OpenGitHubRepo />
+              <div className="absolute top-2 right-4 flex items-center gap-1">
+                <DarkModeToggle />
               </div>
             </div>
           )}
+
+          {/* ── Header (chat started) ── */}
           {chatStarted && (
-            <div className="relative z-10 flex items-center justify-between gap-3 p-2">
-              <div className="relative flex items-center justify-start gap-2">
-                <div className="absolute left-0 z-10">
-                  {(!chatHistoryOpen || !isLargeScreen) && (
-                    <Button
-                      className="hover:bg-gray-100"
-                      variant="ghost"
-                      onClick={() => setChatHistoryOpen((p) => !p)}
-                    >
-                      {chatHistoryOpen ? (
-                        <PanelRightOpen className="size-5" />
-                      ) : (
-                        <PanelRightClose className="size-5" />
-                      )}
-                    </Button>
-                  )}
-                </div>
+            <div className="relative z-10 flex items-center justify-between gap-3 border-b bg-background/80 px-3 py-2 backdrop-blur-sm">
+              <div className="relative flex items-center gap-2">
+                {(!chatHistoryOpen || !isLargeScreen) && (
+                  <Button
+                    className="hover:bg-accent rounded-full"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setChatHistoryOpen((p) => !p)}
+                  >
+                    {chatHistoryOpen ? (
+                      <PanelRightOpen className="size-5" />
+                    ) : (
+                      <PanelRightClose className="size-5" />
+                    )}
+                  </Button>
+                )}
                 <motion.button
-                  className="flex cursor-pointer items-center gap-2"
+                  className="flex cursor-pointer items-center gap-2 rounded-xl px-2 py-1 transition-colors hover:bg-accent"
                   onClick={() => setThreadId(null)}
-                  animate={{
-                    marginLeft: !chatHistoryOpen ? 48 : 0,
-                  }}
-                  transition={{
-                    type: "spring",
-                    stiffness: 300,
-                    damping: 30,
-                  }}
+                  animate={{ marginLeft: !chatHistoryOpen ? 0 : 0 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30 }}
                 >
-                  <LangGraphLogoSVG
-                    width={32}
-                    height={32}
-                  />
-                  <span className="text-xl font-semibold tracking-tight">
+                  <AppLogo size={24} />
+                  <span className="hidden text-base font-semibold tracking-tight sm:block">
                     Agent Chat
                   </span>
                 </motion.button>
               </div>
 
-              <div className="flex items-center gap-4">
-                <div className="flex items-center">
-                  <OpenGitHubRepo />
-                </div>
+              <div className="flex items-center gap-1">
+                <DarkModeToggle />
                 <TooltipIconButton
-                  size="lg"
-                  className="p-4"
+                  size="sm"
+                  className="rounded-full"
                   tooltip="New thread"
                   variant="ghost"
                   onClick={() => setThreadId(null)}
                 >
-                  <SquarePen className="size-5" />
+                  <SquarePen className="size-4" />
                 </TooltipIconButton>
               </div>
 
@@ -393,10 +564,15 @@ export function Thread() {
             </div>
           )}
 
+          {/* ── Messages ── */}
           <StickToBottom className="relative flex-1 overflow-hidden">
             <StickyToBottomContent
               className={cn(
-                "absolute inset-0 overflow-y-scroll px-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-track]:bg-transparent",
+                "absolute inset-0 overflow-y-scroll px-4",
+                "[&::-webkit-scrollbar]:w-1.5",
+                "[&::-webkit-scrollbar-thumb]:rounded-full",
+                "[&::-webkit-scrollbar-thumb]:bg-border",
+                "[&::-webkit-scrollbar-track]:bg-transparent",
                 !chatStarted && "mt-[25vh] flex flex-col items-stretch",
                 chatStarted && "grid grid-rows-[1fr_auto]",
               )}
@@ -421,8 +597,6 @@ export function Thread() {
                         />
                       ),
                     )}
-                  {/* Special rendering case where there are no AI/tool messages, but there is an interrupt.
-                    We need to render it outside of the messages list, since there are no messages to render */}
                   {hasNoAIOrToolMessages && !!stream.interrupt && (
                     <AssistantMessage
                       key="interrupt-msg"
@@ -437,25 +611,33 @@ export function Thread() {
                 </>
               }
               footer={
-                <div className="sticky bottom-0 flex flex-col items-center gap-8 bg-white">
+                <div className="sticky bottom-0 flex flex-col items-center gap-6 bg-background/80 backdrop-blur-sm">
+                  {/* Welcome header */}
                   {!chatStarted && (
-                    <div className="flex items-center gap-3">
-                      <LangGraphLogoSVG className="h-8 flex-shrink-0" />
+                    <motion.div
+                      className="flex flex-col items-center gap-2"
+                      initial={{ opacity: 0, y: 12 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.4, ease: "easeOut" }}
+                    >
+                      <AppLogo size={40} />
                       <h1 className="text-2xl font-semibold tracking-tight">
                         Agent Chat
                       </h1>
-                    </div>
+                      <p className="text-sm text-muted-foreground">
+                        Powered by LangGraph
+                      </p>
+                    </motion.div>
                   )}
 
                   <ScrollToBottom className="animate-in fade-in-0 zoom-in-95 absolute bottom-full left-1/2 mb-4 -translate-x-1/2" />
 
+                  {/* ── Input box ── */}
                   <div
                     ref={dropRef}
                     className={cn(
-                      "bg-muted relative z-10 mx-auto mb-8 w-full max-w-3xl rounded-2xl shadow-xs transition-all",
-                      dragOver
-                        ? "border-primary border-2 border-dotted"
-                        : "border border-solid",
+                      "relative z-10 mx-auto mb-6 w-full max-w-3xl rounded-2xl bg-muted/60 shadow-sm ring-1 ring-border/60 transition-all duration-200",
+                      dragOver && "ring-2 ring-primary ring-offset-1",
                     )}
                   >
                     <form
@@ -483,66 +665,119 @@ export function Thread() {
                             form?.requestSubmit();
                           }
                         }}
-                        placeholder="Type your message..."
-                        className="field-sizing-content resize-none border-none bg-transparent p-3.5 pb-0 shadow-none ring-0 outline-none focus:ring-0 focus:outline-none"
+                        placeholder="Type your message…"
+                        className="field-sizing-content resize-none border-none bg-transparent p-3.5 pb-0 shadow-none ring-0 outline-none focus:ring-0 focus:outline-none placeholder:text-muted-foreground/60 text-sm"
                       />
 
-                      <div className="flex items-center gap-6 p-2 pt-4">
-                        <div>
-                          <div className="flex items-center space-x-2">
-                            <Switch
-                              id="render-tool-calls"
-                              checked={hideToolCalls ?? false}
-                              onCheckedChange={setHideToolCalls}
-                            />
-                            <Label
-                              htmlFor="render-tool-calls"
-                              className="text-sm text-gray-600"
-                            >
-                              Hide Tool Calls
-                            </Label>
-                          </div>
-                        </div>
-                        
-                        <Label
-                          htmlFor="file-input"
-                          className="flex cursor-pointer items-center gap-2"
-                        >
-                          <Plus className="size-5 text-gray-600" />
-                          <span className="text-sm text-gray-600">
-                            Upload PDF or Image
-                          </span>
-                        </Label>
-                        <input
-                          id="file-input"
-                          type="file"
-                          onChange={handleFileUpload}
-                          multiple
-                          accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
-                          className="hidden"
-                        />
-                        <ProviderSwitcher />
-                        {stream.isLoading ? (
-                          <Button
-                            key="stop"
-                            onClick={() => stream.stop()}
-                            className="ml-auto"
-                          >
-                            <LoaderCircle className="h-4 w-4 animate-spin" />
-                            Cancel
-                          </Button>
+                      {/* ── Toolbar ── */}
+                      <div className="flex items-center gap-2 p-2 pt-2">
+                        {isMobile ? (
+                          /* Mobile: consolidated popover */
+                          <MobileToolbar
+                            hideToolCalls={hideToolCalls}
+                            setHideToolCalls={(v) => setHideToolCalls(v)}
+                            handleFileUpload={handleFileUpload}
+                            providerSwitcher={<ProviderSwitcher />}
+                          />
                         ) : (
-                          <Button
-                            type="submit"
-                            className="ml-auto shadow-md transition-all"
-                            disabled={
-                              isLoading ||
-                              (!input.trim() && contentBlocks.length === 0)
-                            }
-                          >
-                            Send
-                          </Button>
+                          /* Desktop: inline controls */
+                          <>
+                            {/* Hide tool calls toggle */}
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setHideToolCalls(!hideToolCalls)
+                                    }
+                                    className={cn(
+                                      "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
+                                      hideToolCalls
+                                        ? "bg-primary/10 text-primary"
+                                        : "text-muted-foreground hover:bg-accent",
+                                    )}
+                                  >
+                                    {hideToolCalls ? (
+                                      <EyeOff className="h-3.5 w-3.5" />
+                                    ) : (
+                                      <Eye className="h-3.5 w-3.5" />
+                                    )}
+                                    <span className="hidden sm:inline">
+                                      {hideToolCalls
+                                        ? "Tools hidden"
+                                        : "Hide tools"}
+                                    </span>
+                                  </button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top">
+                                  {hideToolCalls
+                                    ? "Show tool calls"
+                                    : "Hide tool calls"}
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+
+                            {/* File upload */}
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Label
+                                    htmlFor="file-input"
+                                    className="flex cursor-pointer items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent"
+                                  >
+                                    <Paperclip className="h-3.5 w-3.5" />
+                                    <span className="hidden sm:inline">
+                                      Attach
+                                    </span>
+                                  </Label>
+                                </TooltipTrigger>
+                                <TooltipContent side="top">
+                                  Attach PDF or image
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                            <input
+                              id="file-input"
+                              type="file"
+                              onChange={handleFileUpload}
+                              multiple
+                              accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
+                              className="hidden"
+                            />
+
+                            {/* Provider switcher */}
+                            <ProviderSwitcher />
+                          </>
                         )}
+
+                        {/* Send / Cancel — always rightmost */}
+                        <div className="ml-auto">
+                          {stream.isLoading ? (
+                            <Button
+                              key="stop"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => stream.stop()}
+                              className="rounded-full"
+                            >
+                              <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                              <span className="hidden sm:inline">Cancel</span>
+                            </Button>
+                          ) : (
+                            <Button
+                              type="submit"
+                              size="sm"
+                              className="rounded-full shadow-sm transition-all"
+                              disabled={
+                                isLoading ||
+                                (!input.trim() && contentBlocks.length === 0)
+                              }
+                            >
+                              Send
+                            </Button>
+                          )}
+                        </div>
                       </div>
                     </form>
                   </div>
@@ -551,15 +786,18 @@ export function Thread() {
             />
           </StickToBottom>
         </motion.div>
+
+        {/* ── Artifact panel ── */}
         <div className="relative flex flex-col border-l">
           <div className="absolute inset-0 flex min-w-[30vw] flex-col">
-            <div className="grid grid-cols-[1fr_auto] border-b p-4">
-              <ArtifactTitle className="truncate overflow-hidden" />
+            <div className="grid grid-cols-[1fr_auto] border-b bg-background/80 p-4 backdrop-blur-sm">
+              <ArtifactTitle className="truncate overflow-hidden text-sm font-medium" />
               <button
                 onClick={closeArtifact}
-                className="cursor-pointer"
+                className="cursor-pointer rounded-full p-1 transition-colors hover:bg-accent"
+                aria-label="Close artifact"
               >
-                <XIcon className="size-5" />
+                <XIcon className="size-4" />
               </button>
             </div>
             <ArtifactContent className="relative flex-grow" />

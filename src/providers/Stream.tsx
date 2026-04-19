@@ -86,7 +86,8 @@ const DEFAULT_API_URL = "http://localhost:8000";
 const DEFAULT_ASSISTANT_ID = "agent";
 const PROVIDER_SESSION_KEY = "mikrotheos:provider";
 const THREADS_STORAGE_KEY = "mikrotheos:threads";
-const FALLBACK_PROVIDERS = ["Grok", "venice", "glm-4.7-flash-heretic"];
+const PROVIDERS_STORAGE_KEY = "mikrotheos:providers";
+// Sem FALLBACK_PROVIDERS hardcoded — providers são responsabilidade do backend.
 
 // ─── Helpers localStorage ─────────────────────────────────────────────────────
 
@@ -100,7 +101,7 @@ function loadThreadsFromStorage(): Thread[] {
   }
 }
 
-function upsertThreadInStorage(threadId: string): void {
+function upsertThreadInStorage(threadId: string, firstMessage?: string): void {
   if (typeof window === "undefined") return;
   const threads = loadThreadsFromStorage();
   const exists = threads.find((t) => t.thread_id === threadId);
@@ -109,44 +110,75 @@ function upsertThreadInStorage(threadId: string): void {
       thread_id: threadId,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      metadata: { label: firstMessage ?? threadId },
       values: { messages: [] },
     });
     localStorage.setItem(THREADS_STORAGE_KEY, JSON.stringify(threads));
   }
 }
 
-// ─── Helpers servidor ─────────────────────────────────────────────────────────
-
-async function checkServerStatus(apiUrl: string): Promise<boolean> {
+function loadProvidersFromStorage(): string[] {
+  if (typeof window === "undefined") return [];
   try {
-    const res = await fetch(`${apiUrl}/info`);
-    return res.ok;
+    const raw = localStorage.getItem(PROVIDERS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return false;
+    return [];
   }
 }
 
+function saveProvidersToStorage(providers: string[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(PROVIDERS_STORAGE_KEY, JSON.stringify(providers));
+  } catch {
+    // storage cheio ou bloqueado — ignora silenciosamente
+  }
+}
+
+// ─── Helpers servidor ─────────────────────────────────────────────────────────
+
+/**
+ * Única fonte de verdade sobre o status do backend.
+ * Faz apenas UMA requisição a /info — serve tanto pra detectar status
+ * quanto pra buscar providers. Nunca duplica a checagem.
+ *
+ * Regras:
+ *   - Backend OK + providers → salva cache, backendOnline = true
+ *   - Backend OK sem providers → mal configurado, backendOnline = true
+ *   - Backend caiu → usa cache se tiver, backendOnline = false
+ */
 async function fetchAvailableProviders(
   apiUrl: string,
   apiKey?: string
-): Promise<string[]> {
+): Promise<{ providers: string[]; backendOnline: boolean }> {
   try {
     const headers: Record<string, string> = {};
     if (apiKey) headers["x-api-key"] = apiKey;
-    const res = await fetch(`${apiUrl}/info`, { headers });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    const res = await fetch(`${apiUrl}/info`, { headers, signal: controller.signal }).finally(
+      () => clearTimeout(timeout)
+    );
+
     if (!res.ok) {
-      console.warn(`[providers] /info retornou ${res.status}, usando fallback`);
-      return FALLBACK_PROVIDERS;
+      console.warn(`[providers] /info retornou ${res.status}`);
+      return { providers: loadProvidersFromStorage(), backendOnline: false };
     }
+
     const data = await res.json();
+
     if (Array.isArray(data.providers) && data.providers.length > 0) {
-      return data.providers as string[];
+      saveProvidersToStorage(data.providers);
+      return { providers: data.providers as string[], backendOnline: true };
     }
-    console.info("[providers] /info não retornou providers, usando fallback");
-    return FALLBACK_PROVIDERS;
+
+    console.warn("[providers] /info não retornou providers — backend mal configurado");
+    return { providers: loadProvidersFromStorage(), backendOnline: true };
   } catch (err) {
-    console.warn("[providers] Falha ao buscar /info:", err, "usando fallback");
-    return FALLBACK_PROVIDERS;
+    console.warn("[providers] Falha ao buscar /info:", err);
+    return { providers: loadProvidersFromStorage(), backendOnline: false };
   }
 }
 
@@ -168,6 +200,7 @@ interface ProviderSelectorProps {
   onSelect: (p: string) => void;
   current?: string;
   inline?: boolean;
+  backendOnline?: boolean;
 }
 
 const ProviderSelector: React.FC<ProviderSelectorProps> = ({
@@ -175,6 +208,7 @@ const ProviderSelector: React.FC<ProviderSelectorProps> = ({
   onSelect,
   current,
   inline = false,
+  backendOnline = true,
 }) => {
   const [open, setOpen] = useState(false);
 
@@ -209,6 +243,8 @@ const ProviderSelector: React.FC<ProviderSelectorProps> = ({
     );
   }
 
+  const hasProviders = providers.length > 0;
+
   return (
     <div className="flex min-h-screen w-full items-center justify-center p-4">
       <div className="animate-in fade-in-0 zoom-in-95 bg-background flex max-w-sm flex-col gap-6 rounded-lg border p-8 shadow-lg">
@@ -217,22 +253,40 @@ const ProviderSelector: React.FC<ProviderSelectorProps> = ({
             <Cpu className="h-5 w-5" />
             <h1 className="text-lg font-semibold tracking-tight">Mikrotheos</h1>
           </div>
-          <p className="text-muted-foreground text-sm">
-            Escolha o modelo de linguagem para esta sessão.
+          {!backendOnline && (
+            <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              Backend inacessível.{" "}
+              {hasProviders
+                ? "Exibindo providers da última sessão — as mensagens não serão processadas até o servidor voltar."
+                : "Sem providers disponíveis. Verifique se o servidor está rodando."}
+            </p>
+          )}
+          {backendOnline && (
+            <p className="text-muted-foreground text-sm">
+              Escolha o modelo de linguagem para esta sessão.
+            </p>
+          )}
+        </div>
+
+        {hasProviders ? (
+          <div className="flex flex-col gap-2">
+            {providers.map((p) => (
+              <button
+                key={p}
+                onClick={() => backendOnline && onSelect(p)}
+                disabled={!backendOnline}
+                className="flex items-center justify-between rounded-md border px-4 py-3 text-sm font-medium transition hover:bg-muted hover:border-primary/40 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {p}
+                <ArrowRight className="h-4 w-4 text-muted-foreground" />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="text-muted-foreground text-sm text-center">
+            Nenhum provider disponível.
           </p>
-        </div>
-        <div className="flex flex-col gap-2">
-          {providers.map((p) => (
-            <button
-              key={p}
-              onClick={() => onSelect(p)}
-              className="flex items-center justify-between rounded-md border px-4 py-3 text-sm font-medium transition hover:bg-muted hover:border-primary/40"
-            >
-              {p}
-              <ArrowRight className="h-4 w-4 text-muted-foreground" />
-            </button>
-          ))}
-        </div>
+        )}
       </div>
     </div>
   );
@@ -253,6 +307,8 @@ const ProviderSwitcherComponent: React.FC = () => {
 };
 
 // ─── StreamSession ────────────────────────────────────────────────────────────
+// Sem nenhuma checagem de status aqui — o StreamProvider é a única
+// fonte de verdade sobre disponibilidade do backend.
 
 interface StreamSessionProps {
   children: ReactNode;
@@ -276,7 +332,6 @@ const StreamSession: React.FC<StreamSessionProps> = ({
   const [threadId, setThreadId] = useQueryState("threadId");
   const apiKey = getApiKey() ?? process.env.NEXT_PUBLIC_API_KEY ?? undefined;
 
-  // ← lê do localStorage, não do backend
   const getThreads = useCallback(async (): Promise<Thread[]> => {
     return loadThreadsFromStorage();
   }, []);
@@ -298,22 +353,16 @@ const StreamSession: React.FC<StreamSessionProps> = ({
     },
     onThreadId: (id) => {
       setThreadId(id);
-      upsertThreadInStorage(id); // ← salva no localStorage
+      const input = (streamValue as any)?.messages?.findLast?.(
+        (m: any) => m.type === "human" || m.role === "user"
+      );
+      const label =
+        typeof input?.content === "string"
+          ? input.content
+          : input?.content?.find?.((b: any) => b.type === "text")?.text ?? undefined;
+      upsertThreadInStorage(id, label);
     },
   });
-
-  useEffect(() => {
-    checkServerStatus(apiUrl).then((ok) => {
-      if (!ok) {
-        toast.error("Backend inacessível", {
-          description: `Verifique se o servidor está rodando em ${apiUrl}`,
-          duration: 10_000,
-          richColors: true,
-          closeButton: true,
-        });
-      }
-    });
-  }, [apiUrl]);
 
   const contextValue: StreamContextType = {
     ...streamValue,
@@ -344,8 +393,12 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const finalApiUrl = apiUrl || envApiUrl;
   const finalAssistantId = assistantId || envAssistantId;
 
-  const [provider, setProviderState] = useState<string>("");
-  const [availableProviders, setAvailableProviders] = useState<string[]>(FALLBACK_PROVIDERS);
+  const [provider, setProviderState] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    return sessionStorage.getItem(PROVIDER_SESSION_KEY) ?? "";
+  });
+  const [availableProviders, setAvailableProviders] = useState<string[]>([]);
+  const [backendOnline, setBackendOnline] = useState<boolean>(true);
 
   const setProvider = useCallback((p: string) => {
     setProviderState(p);
@@ -357,7 +410,23 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   useEffect(() => {
     if (!finalApiUrl) return;
     const apiKey = getApiKey() ?? process.env.NEXT_PUBLIC_API_KEY ?? undefined;
-    fetchAvailableProviders(finalApiUrl, apiKey).then(setAvailableProviders);
+    fetchAvailableProviders(finalApiUrl, apiKey).then(({ providers, backendOnline }) => {
+      setAvailableProviders(providers);
+      setBackendOnline(backendOnline);
+
+      // Única notificação de erro — não há segunda checagem em lugar nenhum
+      if (!backendOnline) {
+        const hasCached = providers.length > 0;
+        toast.error("Backend inacessível", {
+          description: hasCached
+            ? `Exibindo ${providers.length} provider(s) da última sessão. As mensagens não serão processadas.`
+            : `Verifique se o servidor está rodando em ${finalApiUrl}`,
+          duration: 10_000,
+          richColors: true,
+          closeButton: true,
+        });
+      }
+    });
   }, [finalApiUrl]);
 
   if (!finalApiUrl || !finalAssistantId) {
@@ -421,7 +490,13 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   }
 
   if (!provider) {
-    return <ProviderSelector providers={availableProviders} onSelect={setProvider} />;
+    return (
+      <ProviderSelector
+        providers={availableProviders}
+        onSelect={setProvider}
+        backendOnline={backendOnline}
+      />
+    );
   }
 
   return (
