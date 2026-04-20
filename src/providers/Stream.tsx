@@ -22,6 +22,7 @@ import {
   type Thread,
   type UIMessage,
   type RemoveUIMessage,
+  type Message,
 } from "./types";
 
 // ─── useQueryState ────────────────────────────────────────────────────────────
@@ -87,7 +88,6 @@ const DEFAULT_ASSISTANT_ID = "agent";
 const PROVIDER_SESSION_KEY = "mikrotheos:provider";
 const THREADS_STORAGE_KEY = "mikrotheos:threads";
 const PROVIDERS_STORAGE_KEY = "mikrotheos:providers";
-// Sem FALLBACK_PROVIDERS hardcoded — providers são responsabilidade do backend.
 
 // ─── Helpers localStorage ─────────────────────────────────────────────────────
 
@@ -101,7 +101,16 @@ function loadThreadsFromStorage(): Thread[] {
   }
 }
 
-function upsertThreadInStorage(threadId: string, firstMessage?: string): void {
+function saveThreadsToStorage(threads: Thread[]): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(THREADS_STORAGE_KEY, JSON.stringify(threads));
+}
+
+/**
+ * Adiciona thread nova ao topo. Não sobrescreve se já existir.
+ * Label e mensagens são atualizados depois via saveThreadMessages.
+ */
+function upsertThreadInStorage(threadId: string): void {
   if (typeof window === "undefined") return;
   const threads = loadThreadsFromStorage();
   const exists = threads.find((t) => t.thread_id === threadId);
@@ -110,11 +119,52 @@ function upsertThreadInStorage(threadId: string, firstMessage?: string): void {
       thread_id: threadId,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-      metadata: { label: firstMessage ?? threadId },
+      metadata: { label: threadId }, // placeholder — atualizado em saveThreadMessages
       values: { messages: [] },
     });
-    localStorage.setItem(THREADS_STORAGE_KEY, JSON.stringify(threads));
+    saveThreadsToStorage(threads);
   }
+}
+
+/**
+ * FIX: Salva mensagens + label no localStorage após cada resposta completa.
+ * Sem isso, trocar de thread sempre mostrava conversa vazia.
+ */
+function saveThreadMessages(threadId: string, messages: Message[]): void {
+  if (typeof window === "undefined" || !messages.length) return;
+  const threads = loadThreadsFromStorage();
+  const idx = threads.findIndex((t) => t.thread_id === threadId);
+  if (idx === -1) return;
+
+  // Extrai label da primeira mensagem humana
+  const firstHuman = messages.find(
+    (m: any) => m.type === "human" || m.role === "user"
+  );
+  const rawContent = firstHuman?.content;
+  const label =
+    typeof rawContent === "string"
+      ? rawContent.slice(0, 60)
+      : Array.isArray(rawContent)
+      ? ((rawContent.find((b: any) => b.type === "text") as any)?.text ?? "").slice(0, 60)
+      : threads[idx].metadata?.label ?? threadId;
+
+  threads[idx] = {
+    ...threads[idx],
+    metadata: { ...threads[idx].metadata, label },
+    values: { messages },
+    updated_at: new Date().toISOString(),
+  };
+  saveThreadsToStorage(threads);
+}
+
+/**
+ * FIX: Retorna mensagens de uma thread do localStorage.
+ * Passado como onLoadHistory para o useStream — evita bater no backend stateless.
+ */
+function loadThreadMessages(threadId: string): Message[] {
+  const threads = loadThreadsFromStorage();
+  const thread = threads.find((t) => t.thread_id === threadId);
+  return (thread?.values?.messages as Message[]) ?? [];
 }
 
 function loadProvidersFromStorage(): string[] {
@@ -139,16 +189,6 @@ function saveProvidersToStorage(providers: string[]): void {
 
 // ─── Helpers servidor ─────────────────────────────────────────────────────────
 
-/**
- * Única fonte de verdade sobre o status do backend.
- * Faz apenas UMA requisição a /info — serve tanto pra detectar status
- * quanto pra buscar providers. Nunca duplica a checagem.
- *
- * Regras:
- *   - Backend OK + providers → salva cache, backendOnline = true
- *   - Backend OK sem providers → mal configurado, backendOnline = true
- *   - Backend caiu → usa cache se tiver, backendOnline = false
- */
 async function fetchAvailableProviders(
   apiUrl: string,
   apiKey?: string
@@ -292,7 +332,7 @@ const ProviderSelector: React.FC<ProviderSelectorProps> = ({
   );
 };
 
-// ─── ProviderSwitcher (fora do hook — evita recriar a cada render) ─────────────
+// ─── ProviderSwitcher ─────────────────────────────────────────────────────────
 
 const ProviderSwitcherComponent: React.FC = () => {
   const { provider, setProvider, availableProviders } = useStreamContext();
@@ -307,8 +347,6 @@ const ProviderSwitcherComponent: React.FC = () => {
 };
 
 // ─── StreamSession ────────────────────────────────────────────────────────────
-// Sem nenhuma checagem de status aqui — o StreamProvider é a única
-// fonte de verdade sobre disponibilidade do backend.
 
 interface StreamSessionProps {
   children: ReactNode;
@@ -343,6 +381,9 @@ const StreamSession: React.FC<StreamSessionProps> = ({
     threadId: threadId || null,
     fetchStateHistory: true,
     extraBody: provider ? { provider_name: provider } : undefined,
+    // FIX: fornece histórico do localStorage ao trocar de thread
+    // evita bater no backend stateless que retornaria vazio
+    onLoadHistory: loadThreadMessages,
     onCustomEvent: (event, opts) => {
       if (isUIMessage(event) || isRemoveUIMessage(event)) {
         opts.mutate((prev) => ({
@@ -351,18 +392,24 @@ const StreamSession: React.FC<StreamSessionProps> = ({
         }));
       }
     },
+    // FIX: onThreadId simplificado — não tenta ler streamValue.messages
+    // (stream ainda não começou nesse momento, messages estaria vazio)
+    // label e mensagens são salvos pelo useEffect abaixo quando o stream termina
     onThreadId: (id) => {
       setThreadId(id);
-      const input = (streamValue as any)?.messages?.findLast?.(
-        (m: any) => m.type === "human" || m.role === "user"
-      );
-      const label =
-        typeof input?.content === "string"
-          ? input.content
-          : input?.content?.find?.((b: any) => b.type === "text")?.text ?? undefined;
-      upsertThreadInStorage(id, label);
+      upsertThreadInStorage(id); // cria entrada no localStorage (placeholder)
     },
   });
+
+  // FIX: Salva mensagens no localStorage sempre que o stream terminar.
+  // Sem isso, trocar de thread mostrava conversa vazia pois localStorage nunca era atualizado.
+  useEffect(() => {
+    if (streamValue.isLoading) return; // stream ainda ativo — aguarda
+    if (!threadId) return;
+    const messages = streamValue.values.messages;
+    if (!messages.length) return;
+    saveThreadMessages(threadId, messages);
+  }, [streamValue.isLoading, threadId]); // dispara quando isLoading vai de true → false
 
   const contextValue: StreamContextType = {
     ...streamValue,
@@ -414,7 +461,6 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       setAvailableProviders(providers);
       setBackendOnline(backendOnline);
 
-      // Única notificação de erro — não há segunda checagem em lugar nenhum
       if (!backendOnline) {
         const hasCached = providers.length > 0;
         toast.error("Backend inacessível", {

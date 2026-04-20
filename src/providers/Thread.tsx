@@ -9,7 +9,7 @@ import {
   Dispatch,
   SetStateAction,
 } from "react";
-import { type Thread } from "./types";
+import { type Thread, type Message } from "./types";
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
@@ -45,6 +45,15 @@ export function upsertThread(thread: Thread): void {
 
 export function deleteThread(threadId: string): void {
   saveThreads(loadThreads().filter((t) => t.thread_id !== threadId));
+}
+
+/**
+ * FIX: Retorna as mensagens de uma thread salva no localStorage.
+ * Usado como onLoadHistory no useStream — evita bater no backend stateless.
+ */
+export function loadThreadMessages(threadId: string): Message[] {
+  const thread = loadThreads().find((t) => t.thread_id === threadId);
+  return (thread?.values?.messages as Message[]) ?? [];
 }
 
 // ─── Contexto ─────────────────────────────────────────────────────────────────

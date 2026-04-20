@@ -19,6 +19,11 @@ export interface UseStreamOptions {
   threadId: string | null;
   fetchStateHistory?: boolean;
   extraBody?: Record<string, unknown>;
+  /**
+   * FIX: Callback para o pai fornecer histórico do localStorage ao trocar de thread.
+   * Evita bater no backend stateless e garante que as mensagens apareçam.
+   */
+  onLoadHistory?: (threadId: string) => Message[];
   onCustomEvent?: (
     event: UIMessage | RemoveUIMessage,
     options: { mutate: (fn: (prev: StateType) => StateType) => void }
@@ -54,6 +59,7 @@ export function useStream(options: UseStreamOptions): UseStreamReturn {
     threadId,
     fetchStateHistory,
     extraBody,
+    onLoadHistory,
     onCustomEvent,
     onThreadId,
   } = options;
@@ -62,8 +68,12 @@ export function useStream(options: UseStreamOptions): UseStreamReturn {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  // Rastreia o último threadId para detectar troca real de thread
   const prevThreadIdRef = useRef<string | null>(null);
+  /**
+   * FIX: Guarda o ID da thread recém-criada pelo submit.
+   * Impede que o useEffect limpe o estado enquanto o stream ainda está rodando.
+   */
+  const justCreatedThreadRef = useRef<string | null>(null);
 
   const mutate = useCallback((fn: (prev: StateType) => StateType) => {
     setValues((prev) => fn(prev));
@@ -81,23 +91,43 @@ export function useStream(options: UseStreamOptions): UseStreamReturn {
     [apiKey]
   );
 
-  // FIX 3 + 7: Limpa estado ao trocar de thread e recarrega histórico
+  /**
+   * FIX: useEffect reescrito para 3 cenários distintos:
+   * 1. Thread nula → limpa estado
+   * 2. Thread recém-criada pelo submit → NÃO limpa, NÃO busca (stream está ativo)
+   * 3. Troca real de thread → limpa + carrega do localStorage via onLoadHistory
+   */
   useEffect(() => {
     const threadChanged = threadId !== prevThreadIdRef.current;
     prevThreadIdRef.current = threadId;
 
-    // Thread nova ou nula → limpa mensagens imediatamente
     if (!threadId) {
       setValues(EMPTY_STATE);
       return;
     }
 
-    if (!fetchStateHistory) return;
+    if (!threadChanged) return;
 
-    // Limpa antes de buscar para não mostrar mensagens antigas
-    if (threadChanged) {
-      setValues(EMPTY_STATE);
+    // Cenário 2: submit acabou de criar essa thread — não interfere
+    if (justCreatedThreadRef.current === threadId) {
+      justCreatedThreadRef.current = null;
+      return;
     }
+
+    // Cenário 3: usuário clicou em outra thread
+    setValues(EMPTY_STATE);
+
+    // Tenta carregar do localStorage via callback do pai (fonte de verdade)
+    if (onLoadHistory) {
+      const cached = onLoadHistory(threadId);
+      if (cached.length > 0) {
+        setValues({ messages: cached, ui: [] });
+        return; // localStorage tem os dados — não precisa do backend
+      }
+    }
+
+    // Fallback: tenta buscar no backend (útil só se backend tiver estado real)
+    if (!fetchStateHistory) return;
 
     fetch(`${apiUrl}/threads/${threadId}/history`, {
       headers: buildHeaders(),
@@ -114,7 +144,7 @@ export function useStream(options: UseStreamOptions): UseStreamReturn {
         });
       })
       .catch((err) => console.warn("[useStream] Erro ao buscar histórico:", err));
-  }, [apiUrl, threadId, fetchStateHistory, buildHeaders]);
+  }, [apiUrl, threadId, fetchStateHistory, buildHeaders, onLoadHistory]);
 
   const submit = useCallback(
     (
@@ -132,13 +162,29 @@ export function useStream(options: UseStreamOptions): UseStreamReturn {
         try {
           let activeThreadId = threadId;
 
-          // FIX 2: usa a mesma lógica UUID/graph_id ao criar a thread
           if (!activeThreadId) {
+            // FIX: extrai label da primeira mensagem humana para exibir na sidebar
+            const newMsgs = (userInput.messages as Message[]) ?? [];
+            const firstHuman = newMsgs.find(
+              (m) =>
+                (m as any).type === "human" || (m as any).role === "user"
+            );
+            const rawContent = firstHuman?.content;
+            const label =
+              typeof rawContent === "string"
+                ? rawContent.slice(0, 60)
+                : Array.isArray(rawContent)
+                ? (rawContent.find((b: any) => b.type === "text")?.text ?? "").slice(0, 60)
+                : "Nova conversa";
+
             const createRes = await fetch(`${apiUrl}/threads`, {
               method: "POST",
               headers: buildHeaders(),
               body: JSON.stringify({
-                metadata: buildThreadMetadata(assistantId),
+                metadata: {
+                  ...buildThreadMetadata(assistantId),
+                  label, // FIX: label salvo para getThreadLabel na sidebar
+                },
               }),
               signal: controller.signal,
             });
@@ -151,12 +197,23 @@ export function useStream(options: UseStreamOptions): UseStreamReturn {
 
             const newThread: Thread = await createRes.json();
             activeThreadId = newThread.thread_id;
+
+            // FIX: marca ANTES de chamar onThreadId para que o useEffect não limpe
+            justCreatedThreadRef.current = activeThreadId;
             if (activeThreadId && onThreadId) onThreadId(activeThreadId);
           }
 
+          // FIX CRÍTICO: manda histórico completo + nova mensagem para o backend
+          // O backend é stateless — precisa receber tudo a cada requisição
+          const currentHistory = values.messages ?? [];
+          const newMsgs = (userInput.messages as Message[]) ?? [];
+
           const body = JSON.stringify({
-            input: userInput,
-            ...buildThreadMetadata(assistantId), // graph_id ou assistant_id correto
+            input: {
+              ...userInput,
+              messages: [...currentHistory, ...newMsgs],
+            },
+            ...buildThreadMetadata(assistantId),
             ...extraBody,
             ...(submitOptions?.config ? { config: submitOptions.config } : {}),
           });
@@ -261,8 +318,9 @@ export function useStream(options: UseStreamOptions): UseStreamReturn {
         }
       })();
     },
+    // FIX: values adicionado às deps para capturar histórico atual no submit
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [apiUrl, apiKey, assistantId, threadId, extraBody, onCustomEvent, onThreadId, mutate, buildHeaders]
+    [apiUrl, apiKey, assistantId, threadId, extraBody, onCustomEvent, onThreadId, mutate, buildHeaders, values, onLoadHistory]
   );
 
   const stop = useCallback(() => {
