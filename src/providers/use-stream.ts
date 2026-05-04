@@ -65,6 +65,8 @@ export function useStream(options: UseStreamOptions): UseStreamReturn {
   } = options;
 
   const [values, setValues] = useState<StateType>(EMPTY_STATE);
+  const valuesRef = useRef<StateType>(EMPTY_STATE);
+  useEffect(() => { valuesRef.current = values; }, [values]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -205,7 +207,7 @@ export function useStream(options: UseStreamOptions): UseStreamReturn {
 
           // FIX CRÍTICO: manda histórico completo + nova mensagem para o backend
           // O backend é stateless — precisa receber tudo a cada requisição
-          const currentHistory = values.messages ?? [];
+          const currentHistory = valuesRef.current.messages ?? [];
           const newMsgs = (userInput.messages as Message[]) ?? [];
 
           const body = JSON.stringify({
@@ -320,7 +322,7 @@ export function useStream(options: UseStreamOptions): UseStreamReturn {
     },
     // FIX: values adicionado às deps para capturar histórico atual no submit
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [apiUrl, apiKey, assistantId, threadId, extraBody, onCustomEvent, onThreadId, mutate, buildHeaders, values, onLoadHistory]
+    [apiUrl, apiKey, assistantId, threadId, extraBody, onCustomEvent, onThreadId, mutate, buildHeaders, onLoadHistory]
   );
 
   const stop = useCallback(() => {

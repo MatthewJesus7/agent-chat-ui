@@ -1,5 +1,7 @@
+"use client";
+
 import { v4 as uuidv4 } from "uuid";
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { useStreamContext } from "@/providers/Stream";
@@ -191,7 +193,6 @@ function DarkModeToggle() {
 }
 
 // ─── ProviderSheet ────────────────────────────────────────────────────────────
-// Wraps the ProviderSwitcher inside a nice Sheet for mobile/desktop
 function ProviderSheet({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   return (
@@ -230,7 +231,6 @@ function ProviderSheet({ children }: { children: ReactNode }) {
 }
 
 // ─── MobileToolbar ────────────────────────────────────────────────────────────
-// Consolidates the 4 cramped items into a clean "+" popover on mobile
 function MobileToolbar({
   hideToolCalls,
   setHideToolCalls,
@@ -263,7 +263,6 @@ function MobileToolbar({
         className="w-56 rounded-2xl p-2 shadow-xl"
       >
         <div className="flex flex-col gap-1">
-          {/* Hide tool calls */}
           <button
             className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors hover:bg-muted"
             onClick={() => setHideToolCalls(!hideToolCalls)}
@@ -281,7 +280,6 @@ function MobileToolbar({
             )}
           </button>
 
-          {/* Upload file */}
           <button
             className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors hover:bg-muted"
             onClick={() => {
@@ -303,7 +301,6 @@ function MobileToolbar({
 
           <div className="my-1 h-px bg-border" />
 
-          {/* Provider switcher inline */}
           <div className="flex items-center gap-3 rounded-xl px-3 py-2.5">
             <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />
             <span className="text-sm">AI Provider</span>
@@ -351,11 +348,12 @@ export function Thread() {
 
   const lastError = useRef<string | undefined>(undefined);
 
-  const setThreadId = (id: string | null) => {
+  // FIX 2a: useCallback para evitar invalidar memoização dos filhos
+  const setThreadId = useCallback((id: string | null) => {
     _setThreadId(id);
     closeArtifact();
     setArtifactContext({});
-  };
+  }, [_setThreadId, closeArtifact, setArtifactContext]);
 
   useEffect(() => {
     if (!stream.error) {
@@ -433,7 +431,8 @@ export function Thread() {
     setContentBlocks([]);
   };
 
-  const handleRegenerate = (
+  // FIX 2b: useCallback para estabilizar referência passada como prop à lista de mensagens
+  const handleRegenerate = useCallback((
     parentCheckpoint: Checkpoint | null | undefined,
   ) => {
     prevMessageLength.current = prevMessageLength.current - 1;
@@ -444,11 +443,18 @@ export function Thread() {
       streamSubgraphs: true,
       streamResumable: true,
     });
-  };
+  }, [stream.submit]);
 
   const chatStarted = !!threadId || !!messages.length;
-  const hasNoAIOrToolMessages = !messages.find(
-    (m) => m.type === "ai" || m.type === "tool",
+
+  // FIX 3: useMemo para evitar Array.find e Array.filter a cada chunk SSE
+  const hasNoAIOrToolMessages = useMemo(
+    () => !messages.find((m) => m.type === "ai" || m.type === "tool"),
+    [messages],
+  );
+  const visibleMessages = useMemo(
+    () => messages.filter((m) => !m.id?.startsWith(DO_NOT_RENDER_ID_PREFIX)),
+    [messages],
   );
 
   return (
@@ -579,24 +585,22 @@ export function Thread() {
               contentClassName="pt-8 pb-16 max-w-3xl mx-auto flex flex-col gap-4 w-full"
               content={
                 <>
-                  {messages
-                    .filter((m) => !m.id?.startsWith(DO_NOT_RENDER_ID_PREFIX))
-                    .map((message, index) =>
-                      message.type === "human" ? (
-                        <HumanMessage
-                          key={message.id || `${message.type}-${index}`}
-                          message={message}
-                          isLoading={isLoading}
-                        />
-                      ) : (
-                        <AssistantMessage
-                          key={message.id || `${message.type}-${index}`}
-                          message={message}
-                          isLoading={isLoading}
-                          handleRegenerate={handleRegenerate}
-                        />
-                      ),
-                    )}
+                  {visibleMessages.map((message, index) =>
+                    message.type === "human" ? (
+                      <HumanMessage
+                        key={message.id || `${message.type}-${index}`}
+                        message={message}
+                        isLoading={isLoading}
+                      />
+                    ) : (
+                      <AssistantMessage
+                        key={message.id || `${message.type}-${index}`}
+                        message={message}
+                        isLoading={isLoading}
+                        handleRegenerate={handleRegenerate}
+                      />
+                    ),
+                  )}
                   {hasNoAIOrToolMessages && !!stream.interrupt && (
                     <AssistantMessage
                       key="interrupt-msg"
@@ -612,7 +616,6 @@ export function Thread() {
               }
               footer={
                 <div className="sticky bottom-0 flex flex-col items-center gap-6 bg-background/80 backdrop-blur-sm">
-                  {/* Welcome header */}
                   {!chatStarted && (
                     <motion.div
                       className="flex flex-col items-center gap-2"
@@ -672,7 +675,6 @@ export function Thread() {
                       {/* ── Toolbar ── */}
                       <div className="flex items-center gap-2 p-2 pt-2">
                         {isMobile ? (
-                          /* Mobile: consolidated popover */
                           <MobileToolbar
                             hideToolCalls={hideToolCalls}
                             setHideToolCalls={(v) => setHideToolCalls(v)}
@@ -680,9 +682,7 @@ export function Thread() {
                             providerSwitcher={<ProviderSwitcher />}
                           />
                         ) : (
-                          /* Desktop: inline controls */
                           <>
-                            {/* Hide tool calls toggle */}
                             <TooltipProvider>
                               <Tooltip>
                                 <TooltipTrigger asChild>
@@ -718,7 +718,6 @@ export function Thread() {
                               </Tooltip>
                             </TooltipProvider>
 
-                            {/* File upload */}
                             <TooltipProvider>
                               <Tooltip>
                                 <TooltipTrigger asChild>
@@ -746,12 +745,10 @@ export function Thread() {
                               className="hidden"
                             />
 
-                            {/* Provider switcher */}
                             <ProviderSwitcher />
                           </>
                         )}
 
-                        {/* Send / Cancel — always rightmost */}
                         <div className="ml-auto">
                           {stream.isLoading ? (
                             <Button

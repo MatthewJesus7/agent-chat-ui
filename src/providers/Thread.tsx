@@ -6,6 +6,7 @@ import {
   ReactNode,
   useCallback,
   useState,
+  useMemo,
   Dispatch,
   SetStateAction,
 } from "react";
@@ -13,7 +14,7 @@ import { type Thread, type Message } from "./types";
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
-const STORAGE_KEY = "mikrotheos:threads";
+const STORAGE_KEY = "llm_router:threads";
 
 // ─── Helpers localStorage ─────────────────────────────────────────────────────
 
@@ -78,10 +79,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     return loadThreads();
   }, []);
 
+  const contextValue = useMemo(
+    () => ({ getThreads, threads, setThreads, threadsLoading, setThreadsLoading }),
+    [getThreads, threads, threadsLoading]
+  );
+
   return (
-    <ThreadContext.Provider
-      value={{ getThreads, threads, setThreads, threadsLoading, setThreadsLoading }}
-    >
+    <ThreadContext.Provider value={contextValue}>
       {children}
     </ThreadContext.Provider>
   );

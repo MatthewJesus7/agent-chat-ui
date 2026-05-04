@@ -1,5 +1,7 @@
 "use client";
 
+// llm_router
+
 import React, {
   createContext,
   useContext,
@@ -85,9 +87,9 @@ function useQueryState(
 
 const DEFAULT_API_URL = "http://localhost:8000";
 const DEFAULT_ASSISTANT_ID = "agent";
-const PROVIDER_SESSION_KEY = "mikrotheos:provider";
-const THREADS_STORAGE_KEY = "mikrotheos:threads";
-const PROVIDERS_STORAGE_KEY = "mikrotheos:providers";
+const PROVIDER_SESSION_KEY = "llm_router:provider";
+const THREADS_STORAGE_KEY = "llm_router:threads";
+const PROVIDERS_STORAGE_KEY = "llm_router:providers";
 
 // ─── Helpers localStorage ─────────────────────────────────────────────────────
 
@@ -291,7 +293,7 @@ const ProviderSelector: React.FC<ProviderSelectorProps> = ({
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
             <Cpu className="h-5 w-5" />
-            <h1 className="text-lg font-semibold tracking-tight">Mikrotheos</h1>
+            <h1 className="text-lg font-semibold tracking-tight">llm_router</h1>
           </div>
           {!backendOnline && (
             <p className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -482,7 +484,7 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({ children }) 
           <div className="mt-12 flex flex-col gap-2 border-b p-6">
             <div className="flex items-center gap-2">
               <Cpu className="h-6 w-6" />
-              <h1 className="text-xl font-semibold tracking-tight">Mikrotheos</h1>
+              <h1 className="text-xl font-semibold tracking-tight">llm_router</h1>
             </div>
             <p className="text-muted-foreground text-sm">
               Informe a URL do servidor para começar.
